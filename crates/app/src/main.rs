@@ -2277,11 +2277,14 @@ struct Workbench {
     /// `running_fix` belongs to it.
     onboarding_step: Option<&'static str>,
     /// Set when the auto-run reaches a check that needs the user to act outside the app
-    /// (a `Fix::Manual`, a `Fix::Adopt`, or a sign-in link) — paused, not failed.
+    /// (a `Fix::Manual` or a sign-in link) — paused, not failed.
     onboarding_awaiting_manual: Option<&'static str>,
     /// One-line verdicts for steps that already ran and are no longer the active row, so
     /// their box can collapse instead of keeping every finished step's full log on screen.
     onboarding_history: Vec<OnboardingStepResult>,
+    /// Steps the user chose to skip for this session: the auto-run walks past them. Skipping
+    /// a required one never counts as finishing onboarding, so it comes back next launch.
+    onboarding_skipped: Vec<&'static str>,
     onboarding_focus: gpui::FocusHandle,
     /// A run paused at the approval gate: the command it wants to run, awaiting a
     /// decision. While this is set the turn is *open*, not finished.
@@ -2813,6 +2816,7 @@ impl Workbench {
             onboarding_step: None,
             onboarding_awaiting_manual: None,
             onboarding_history: Vec::new(),
+            onboarding_skipped: Vec::new(),
             onboarding_focus: cx.focus_handle(),
             pending_approval: None,
             pending_mcp_elicitation: None,
@@ -3399,6 +3403,16 @@ impl Workbench {
                     };
                     let blocked = !report.ready();
                     workbench.report = Some(report);
+                    // A failed fix whose own check now passes is no longer news. Kept, it drew
+                    // "Install Ubuntu — failed" under a green WSL2 runtime row and left the
+                    // primary button on "Retry", offering to repeat an install that the check
+                    // had just shown was working (the elevated install's result is judged by
+                    // its window closing, not by what it did).
+                    if workbench.running_fix.as_ref().is_some_and(|fix| {
+                        fix.done && !fix.ok && !workbench.still_unfixed(fix.check_id)
+                    }) {
+                        workbench.running_fix = None;
+                    }
                     if std::mem::take(&mut workbench.judge_after_recheck) {
                         workbench.judge_finished_fix();
                     }
@@ -3432,7 +3446,59 @@ impl Workbench {
         self.onboarding_step = None;
         self.onboarding_awaiting_manual = None;
         self.onboarding_history.clear();
+        self.onboarding_skipped.clear();
         self.run_preflight(cx);
+    }
+
+    /// The next check the sequence still has to deal with: failing or warning, and not one
+    /// the user skipped. Shared by the sequencer and the modal's primary button.
+    fn onboarding_next_check(&self) -> Option<&preflight::Check> {
+        self.report.as_ref()?.checks.iter().find(|check| {
+            matches!(check.state, preflight::State::Fail | preflight::State::Warn)
+                && !self.onboarding_skipped.contains(&check.id)
+        })
+    }
+
+    /// Bound to a row's "Skip this step": walk past it and carry on with the rest.
+    fn skip_onboarding_step(&mut self, check_id: &'static str, cx: &mut Context<Self>) {
+        if !self.onboarding_skipped.contains(&check_id) {
+            self.onboarding_skipped.push(check_id);
+        }
+        if self.onboarding_awaiting_manual == Some(check_id) {
+            self.onboarding_awaiting_manual = None;
+        }
+        self.onboarding_auto_running = true;
+        self.onboarding_advance(cx);
+        cx.notify();
+    }
+
+    /// Bound to the key step's Save: file the pasted key where every turn reads it, then
+    /// re-check — and resume the sequence if it was paused on this step.
+    fn save_onboarding_key(&mut self, cx: &mut Context<Self>) {
+        let value = self.field_text(Field::ApiKey, cx);
+        if value.is_empty() {
+            self.say("paste your API key first", cx);
+            return;
+        }
+        let stored = settings::Settings::load();
+        if let Err(error) = settings::set_secret(&stored.key_name(), &value) {
+            // Which keychain failed, never the value.
+            self.say(format!("could not store the key: {error:#}"), cx);
+            return;
+        }
+        if let Some((_, composer)) = self.fields.iter().find(|(field, _)| *field == Field::ApiKey)
+        {
+            composer.update(cx, |composer, cx| composer.set_text("", cx));
+        }
+        // The sidecar carries the key with the model choice, so it has to hear about it now
+        // rather than on the next Settings save.
+        self.sidecar.set_model(model_choice(&stored));
+        self.say("API key stored", cx);
+        if self.onboarding_awaiting_manual == Some("model-key") {
+            self.resume_onboarding(cx);
+        } else {
+            self.run_preflight(cx);
+        }
     }
 
     /// Bound to the modal's "Get Started" button: begin auto-running every pending check's
@@ -3457,15 +3523,15 @@ impl Workbench {
             // Still checking — `run_preflight`'s completion handler calls back in here.
             return;
         };
-        let Some(check) = report
-            .checks
-            .iter()
-            .find(|check| matches!(check.state, preflight::State::Fail | preflight::State::Warn))
-        else {
-            // Nothing left to fix.
+        let ready = report.ready();
+        let Some(check) = self.onboarding_next_check().cloned() else {
+            // Nothing left to fix, or only steps the user skipped. A skipped *required* step
+            // means onboarding is not finished, so it is not recorded as such.
             self.onboarding_auto_running = false;
             self.onboarding_step = None;
-            self.mark_onboarded();
+            if ready {
+                self.mark_onboarded();
+            }
             return;
         };
         // The step we were driving just resolved (successfully, since the auto-run only
@@ -3515,20 +3581,31 @@ impl Workbench {
                 }
                 self.start_fix(label.to_string(), argv.clone(), check.id, cx);
             }
-            Some(preflight::Fix::Manual(_)) | Some(preflight::Fix::Adopt { .. }) => {
+            Some(preflight::Fix::Manual(_)) | Some(preflight::Fix::EnterKey) => {
                 self.onboarding_auto_running = false;
                 self.onboarding_awaiting_manual = Some(check.id);
             }
         }
     }
 
-    /// Bound to "Retry" after a fix fails: re-issue the same fix.
+    /// Bound to "Retry" after a fix fails: re-check, then re-issue the fix only if the step
+    /// still fails.
+    ///
+    /// **Re-checked first, because a fix can fail and still have worked.** The elevated
+    /// `wsl --install -d Ubuntu` is judged by its window closing, not by what it did, and a
+    /// researcher who closed it after Ubuntu's first-launch prompt saw the step stay red over a
+    /// distro that was installed and answering. Retry advanced on that stale report, so it
+    /// re-ran the install, which
+    /// errors on an existing distro in a window this app cannot read: "failed. Nothing to show
+    /// here", on every press, forever. The re-check's completion calls `onboarding_advance`
+    /// (because `onboarding_auto_running` is set), which moves on if the step now passes and
+    /// runs the fix again if it does not.
     fn retry_onboarding_step(&mut self, cx: &mut Context<Self>) {
         self.onboarding_auto_running = true;
-        self.onboarding_advance(cx);
+        self.run_preflight(cx);
     }
 
-    /// Bound to "Continue" once the user has done whatever a `Fix::Manual`/`Fix::Adopt` step
+    /// Bound to "Continue" once the user has done whatever a `Fix::Manual` step
     /// needed outside the app: re-check, and resume the sequence if that step now passes.
     fn resume_onboarding(&mut self, cx: &mut Context<Self>) {
         let awaited = self.onboarding_awaiting_manual;
@@ -3552,29 +3629,6 @@ impl Workbench {
             tracing::warn!(%error, "could not remember that onboarding finished");
         }
         self.draft.onboarding_completed = true;
-    }
-
-    /// Point the app at a checkout the user already has.
-    ///
-    /// Recorded as **not owned**, which is the whole point: the app will run this backend
-    /// but will never `git checkout` or re-sync it, because that would destroy work in a
-    /// clone somebody else is responsible for.
-    fn adopt_checkout(&mut self, dir: String, cx: &mut Context<Self>) {
-        let mut settings = settings::Settings::load();
-        settings.backend_dir = dir.clone();
-        settings.backend_dir_owned = false;
-        match settings.save() {
-            Ok(()) => {
-                self.draft = settings;
-                // The launch command is built at startup from this path, so it cannot
-                // take effect until the app restarts — say so plainly instead of leaving
-                // the user to wonder why the row is still red.
-                self.status = format!("using {dir} — restart the app to launch it");
-                self.settings_note = format!("Backend set to {dir}. Restart to use it.");
-            }
-            Err(error) => self.status = format!("could not save that choice: {error:#}"),
-        }
-        self.run_preflight(cx);
     }
 
 
@@ -3903,7 +3957,12 @@ impl Workbench {
                             // tries to open it with `gio`, which fails inside WSL: no
                             // browser there. Catching the URL is what lets the app open it
                             // on the host, where the browser is (docs §32c).
-                            if fix.link.is_none() {
+                            //
+                            // Only for a sign-in. Every other fix's URLs are output, not a
+                            // page to visit: "Install the Asta CLI" prints uv's
+                            // `(from git+https://github.com/allenai/asta-plugins.git@<sha>)`,
+                            // which became an "Open sign-in page" button pointing at GitHub.
+                            if fix.link.is_none() && fix.label.contains("Sign in") {
                                 fix.link = first_url(&line);
                             }
                             fix.lines.push(line);
@@ -3912,6 +3971,7 @@ impl Workbench {
                             }
                         }
                         sidecar::FixEvent::Finished { ok, note } => {
+                            let check_id = fix.check_id;
                             fix.done = true;
                             fix.ok = ok;
                             fix.notes.push(format!("— {note}"));
@@ -3936,6 +3996,13 @@ impl Workbench {
                             if ok {
                                 workbench.judge_after_recheck = true;
                                 workbench.run_preflight(cx);
+                                // A backend set up (or updated) after launch has nothing
+                                // running it: the launch-time start already failed on the
+                                // missing folder. Start it now instead of leaving that to a
+                                // Restart button nobody knows to press.
+                                if matches!(check_id, "checkout" | "backend-build") {
+                                    workbench.restart_backend(cx);
+                                }
                             } else if workbench.onboarding_auto_running {
                                 // Stop the sequence here — the log stays up as-is, and the
                                 // modal's primary button switches to "Retry".
@@ -4219,6 +4286,13 @@ impl Workbench {
     fn restart_backend(&mut self, cx: &mut Context<Self>) {
         if self.streaming {
             self.say("can't restart the backend mid-turn", cx);
+            return;
+        }
+        // A restart runs the launch's own dependency install, so doing it while setup is still
+        // copying and installing puts two `uv sync`s on one folder at once.
+        if let Some(fix) = self.running_fix.as_ref().filter(|fix| !fix.done) {
+            let label = fix.label.clone();
+            self.say(format!("wait for \"{label}\" to finish before restarting the backend"), cx);
             return;
         }
         self.status = "restarting the backend…".into();
@@ -11295,11 +11369,11 @@ fn main() {
                         println!("    fix  : {label} ({note})");
                         println!("    run  : {}", preflight::display_argv(argv));
                     }
-                    preflight::Fix::Adopt { label, dir } => {
-                        println!("    fix  : {label} — {dir}");
-                    }
                     preflight::Fix::Manual(instruction) => {
                         println!("    fix  : {instruction}");
+                    }
+                    preflight::Fix::EnterKey => {
+                        println!("    fix  : paste your API key (or run --set-secret llm:<provider>)");
                     }
                 }
             }

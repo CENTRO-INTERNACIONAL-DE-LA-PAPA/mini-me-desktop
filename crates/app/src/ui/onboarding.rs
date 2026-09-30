@@ -3,7 +3,7 @@
 //! **One button, not one button per row.** The Setup pane made a first-time researcher find
 //! and click every failing check's fix in turn; this walks the same list of
 //! [`preflight::Check`]s automatically from a single "Get Started" press, stopping only where
-//! a person genuinely has to act (a sign-in, an adoption, a manual step) — see
+//! a person genuinely has to act (a sign-in, a manual step) — see
 //! [`Workbench::onboarding_advance`] in `main.rs` for the sequencer this renders.
 //!
 //! **Log in place, not log at the bottom.** The old pane kept one scrolling output box below
@@ -112,7 +112,7 @@ impl Workbench {
 
     /// One step: glyph, label, detail, and whatever belongs under it right now — the live
     /// log if it is the active row, a collapsed verdict if it already finished and moved on,
-    /// a manual/adopt prompt if the sequence is waiting on the user, or nothing at all once
+    /// a manual prompt if the sequence is waiting on the user, or nothing at all once
     /// it has passed and been forgotten.
     fn onboarding_step_row(
         &self,
@@ -140,8 +140,10 @@ impl Workbench {
             }
         };
         let is_active = self.onboarding_step == Some(check.id);
-        let running = is_active
-            && self.running_fix.as_ref().is_some_and(|fix| fix.check_id == check.id);
+        // This row's fix, however it was started. Tying it to `is_active` hid the spinner and
+        // the live log whenever a row's own button was pressed rather than "Get Started",
+        // because only the auto-run sets `onboarding_step`.
+        let running = self.running_fix.as_ref().is_some_and(|fix| fix.check_id == check.id);
 
         let mut row = div()
             .flex()
@@ -248,7 +250,7 @@ impl Workbench {
             }
         }
 
-        // Waiting on the user: a `Fix::Manual`/`Fix::Adopt` step the auto-run reached and
+        // Waiting on the user: a `Fix::Manual` step the auto-run reached and
         // paused on, or the same rendered before the sequence has started at all.
         //
         // Not when `pending_restart`, though — the auto-run parks there with
@@ -259,6 +261,9 @@ impl Workbench {
         // is exactly what read as confusing.
         if !pending_restart
             && (self.onboarding_awaiting_manual == Some(check.id)
+                // A skipped step stays actionable once the sequence stops, so a key can still
+                // be pasted after skipping past it.
+                || (!self.onboarding_auto_running && self.onboarding_skipped.contains(&check.id))
                 || (!self.onboarding_auto_running
                     && self.running_fix.is_none()
                     && check.state != preflight::State::Pass))
@@ -314,32 +319,6 @@ impl Workbench {
                                     ),
                             );
                     }
-                    preflight::Fix::Adopt { label, dir } => {
-                        row = row
-                            .child(
-                                div()
-                                    .text_color(rgb(theme::text_muted()))
-                                    .text_xs()
-                                    .child(
-                                        "this step needs you — adopt the checkout you already \
-                                         have, then press Continue below",
-                                    ),
-                            )
-                            .child(
-                                ui::Button::new(SharedString::from(format!(
-                                    "adopt-{}",
-                                    check.id
-                                )))
-                                .text(*label)
-                                .style(ui::ButtonStyle::Primary)
-                                .on_click(cx.listener({
-                                    let dir = dir.clone();
-                                    move |workbench, _event, _window, cx| {
-                                        workbench.adopt_checkout(dir.clone(), cx);
-                                    }
-                                })),
-                            );
-                    }
                     preflight::Fix::Manual(instruction) => {
                         row = row.child(
                             div()
@@ -353,8 +332,22 @@ impl Workbench {
                                 )),
                         );
                     }
+                    preflight::Fix::EnterKey => {
+                        row = row.child(self.onboarding_key_entry(check.id, cx));
+                    }
                 }
             }
+        }
+
+        if self.onboarding_skipped.contains(&check.id) && check.state != preflight::State::Pass {
+            row = row.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child("Skipped — Mini-Me will ask again next time it opens"),
+            );
         }
 
         // The active row's live output — the same box the old Setup pane showed at the
@@ -366,6 +359,74 @@ impl Workbench {
         }
 
         row
+    }
+
+    /// The key step's own controls: the masked API key field Settings uses, Save, and Skip.
+    ///
+    /// In place rather than "open Settings", because the modal covers Settings and a
+    /// first-time user had no way to reach it.
+    fn onboarding_key_entry(
+        &self,
+        check_id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let provider = settings::provider(&self.draft.provider)
+            .map_or(self.draft.provider.as_str(), |provider| provider.label);
+        let mut entry = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child(format!(
+                        "Paste your {provider} API key — it goes into this computer's keychain, \
+                         never into a file. To use a different provider, change it in Settings \
+                         afterwards."
+                    )),
+            );
+        if let Some((_, composer)) = self.fields.iter().find(|(field, _)| *field == Field::ApiKey)
+        {
+            entry = entry.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .track_focus(&composer.focus_handle(cx))
+                    .in_focus(|style| style.border_color(rgb(theme::accent())))
+                    .child(composer.clone()),
+            );
+        }
+        let skipped = self.onboarding_skipped.contains(&check_id);
+        entry.child(
+            ui::actions()
+                .gap_2()
+                .child(
+                    ui::Button::new("onboarding-save-key")
+                        .text("Save key")
+                        .style(ui::ButtonStyle::Primary)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.save_onboarding_key(cx);
+                        })),
+                )
+                .when(!skipped, |actions| {
+                    actions.child(
+                        ui::Button::new("onboarding-skip-key").text("Skip this step").on_click(
+                            cx.listener(move |workbench, _event, _window, cx| {
+                                workbench.skip_onboarding_step(check_id, cx);
+                            }),
+                        ),
+                    )
+                }),
+        )
     }
 
     /// The live/finished output of whichever fix is running — Stop, sign-in link, the
@@ -534,6 +595,20 @@ impl Workbench {
                     .style(ui::ButtonStyle::Primary)
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.resume_onboarding(cx);
+                    }))
+            }
+            // The sequence ran out with only skipped steps left. Not "Done": a skipped
+            // required step means onboarding is not finished, so closing does not record it.
+            Some(_)
+                if !self.onboarding_skipped.is_empty() && self.onboarding_next_check().is_none() =>
+            {
+                ui::Button::new("onboarding-primary")
+                    .text("Close")
+                    .style(ui::ButtonStyle::Primary)
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.onboarding_open = false;
+                        workbench.restore_focus = true;
+                        cx.notify();
                     }))
             }
             Some(_) if self.running_fix.as_ref().is_some_and(|fix| fix.done && !fix.ok) => {

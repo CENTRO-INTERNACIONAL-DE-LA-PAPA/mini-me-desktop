@@ -254,12 +254,12 @@ impl BackendConfig {
 
     /// Build a configuration that honours the checkout Settings recorded.
     ///
-    /// The Setup pane writes `backend_dir` when it adopts a checkout it discovered, so
-    /// the discovery probe — which has to shell into the distro — runs once rather than
-    /// on every launch.
+    /// Only a directory recorded as **owned** is honoured. Older versions let Setup adopt a
+    /// checkout they found (`backend_dir_owned == false`); the app now always runs the backend
+    /// it ships, so such a recording is ignored and the app-owned install takes its place.
     fn with_recorded_dir(settings: &crate::settings::Settings) -> Self {
         let recorded = Some(settings.backend_dir.trim())
-            .filter(|dir| !dir.is_empty())
+            .filter(|dir| !dir.is_empty() && settings.backend_dir_owned)
             .map(|dir| (dir.to_string(), settings.backend_dir_owned));
         Self::build(recorded)
     }
@@ -958,6 +958,9 @@ pub(crate) fn quote_path(path: &str) -> String {
 /// about throughput.
 const JOBS_PER_WORKER: u8 = 10;
 
+/// The distro onboarding installs (`wsl --install -d Ubuntu`) and the backend runs in.
+pub const INSTALLED_DISTRO: &str = "Ubuntu";
+
 /// Read the WSL configuration from the environment.
 ///
 /// **On Windows this is the default**, because native Windows cannot host the
@@ -965,7 +968,14 @@ const JOBS_PER_WORKER: u8 = 10;
 /// `bash`/`python3`/`asta` (see docs §13). Set `MINIME_BACKEND_WSL=0` to opt out
 /// and run the backend on the host anyway.
 ///
-/// `MINIME_BACKEND_WSL=1` (or `true`) uses WSL's default distro; any other value
+/// Unset, it targets [`INSTALLED_DISTRO`] **by name** — the distro onboarding installs.
+/// Never WSL's default distro implicitly: Docker Desktop registers `docker-desktop`, which
+/// has no `bash`, and once it is the only distro left (a wiped Ubuntu, or Docker installed
+/// first) it becomes the default. `wsl --install -d Ubuntu` does not change the default, so
+/// every probe kept landing in Docker's distro and failing, and the "Install Ubuntu" fix
+/// re-ran an install that had already succeeded — its window flashed and closed, forever.
+///
+/// `MINIME_BACKEND_WSL=1` (or `true`) opts into WSL's default distro; any other value
 /// is taken as the distro name. The checkout path inside the distro comes from
 /// `MINIME_BACKEND_WSL_DIR`, or from what Settings recorded, or from
 /// [`owned_wsl_dir`].
@@ -986,9 +996,9 @@ fn resolve_wsl_target(recorded: Option<(String, bool)>) -> Option<(WslTarget, bo
         return None;
     }
 
-    let use_default_distro =
-        raw.is_empty() || raw.eq_ignore_ascii_case("1") || raw.eq_ignore_ascii_case("true");
-    let distro = if use_default_distro {
+    let distro = if raw.is_empty() {
+        Some(INSTALLED_DISTRO.to_string())
+    } else if raw.eq_ignore_ascii_case("1") || raw.eq_ignore_ascii_case("true") {
         None
     } else {
         Some(raw.to_string())
@@ -1029,9 +1039,8 @@ fn owned_host_dir() -> PathBuf {
 /// Where the Mini-Me Python checkout lives, and whether the app owns it.
 ///
 /// Order: an explicit `MINIME_BACKEND_DIR`, then what Settings recorded, then the
-/// conventional developer locations, then the app-owned path. Only the last is *owned* —
-/// everything else is a checkout someone else is responsible for, and the app must not
-/// run destructive git on it.
+/// app-owned path. Only the environment variable is *not* owned — a developer pointed the
+/// app at their own folder, and the app must not copy the bundle over it.
 fn resolve_project_dir(recorded: Option<(PathBuf, bool)>) -> (PathBuf, bool) {
     if let Some(dir) = std::env::var_os("MINIME_BACKEND_DIR") {
         return (PathBuf::from(dir), false);
@@ -1039,29 +1048,9 @@ fn resolve_project_dir(recorded: Option<(PathBuf, bool)>) -> (PathBuf, bool) {
     if let Some(recorded) = recorded {
         return recorded;
     }
-    let owned = owned_host_dir();
-    if owned.join("langgraph.json").is_file() {
-        return (owned, true);
-    }
-    let mut candidates = Vec::new();
-    // Windows sets USERPROFILE, not HOME — without this the candidates below are
-    // skipped entirely and discovery falls through to the cwd.
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    if let Some(home) = home {
-        candidates.push(PathBuf::from(&home).join("Documents/Mini-Me"));
-        candidates.push(PathBuf::from(&home).join("Documents/GitHub/Mini-Me"));
-    }
-    // A sibling of this repo, the layout a `git clone` pair produces.
-    candidates.push(PathBuf::from("../Mini-Me"));
-    match candidates
-        .into_iter()
-        .find(|p| p.join("langgraph.json").is_file())
-    {
-        Some(found) => (found, false),
-        // Nothing anywhere: name the path we would provision *into*, so the Setup pane
-        // reports "not installed here" rather than "no langgraph.json in `.`".
-        None => (owned, true),
-    }
+    // Always the app's own install of the bundled backend — no discovery of copies elsewhere.
+    // Not installed yet still names this path, so Setup reports "not installed here".
+    (owned_host_dir(), true)
 }
 
 impl BackendConfig {
@@ -2328,14 +2317,10 @@ mod tests {
         std::env::remove_var("MINIME_BACKEND_WSL_DIR");
         std::env::remove_var("MINIME_BACKEND_DIR");
 
-        // A fresh machine — nothing recorded, nothing to discover — lands on the
-        // app-owned path and claims it. `HOME` is redirected because the developer box
-        // running this test *does* have a checkout to discover, and finding one is a
-        // different case (asserted below).
+        // A fresh machine — nothing recorded — lands on the app-owned path and claims it.
+        // `HOME` is redirected so a checkout planted below cannot leak into other runs.
         let empty = std::env::temp_dir().join("mini-me-fresh-machine");
-        // Cleared first: the second half of this test plants a checkout under this home,
-        // so without it the *next* run would discover that one and "fresh machine" would
-        // no longer be fresh. It failed exactly that way once.
+        // Cleared first: the second half of this test plants a checkout under this home.
         let _ = std::fs::remove_dir_all(&empty);
         std::fs::create_dir_all(&empty).expect("scratch home");
         let real_home = std::env::var_os("HOME");
@@ -2345,14 +2330,24 @@ mod tests {
         assert!(owned, "the app-owned path is ours to manage");
         assert_eq!(dir, empty.join("data/backend"), "{}", dir.display());
 
-        // A checkout the app merely *found* is adopted, never owned — this is the case
-        // that protects a developer's working clone.
+        // A copy elsewhere on the machine is not picked up: the app always runs the backend
+        // it ships, in its own install.
         let theirs = empty.join("Documents/Mini-Me");
         std::fs::create_dir_all(&theirs).expect("their checkout");
         std::fs::write(theirs.join("langgraph.json"), "{}").expect("write");
         let (dir, owned) = resolve_project_dir(None);
-        assert_eq!(dir, theirs);
-        assert!(!owned, "a discovered checkout belongs to whoever made it");
+        assert_eq!(dir, empty.join("data/backend"), "{}", dir.display());
+        assert!(owned);
+
+        // A folder an older version adopted is ignored in favour of the app's own install.
+        let adopted = crate::settings::Settings {
+            backend_dir: "/home/x/Mini-Me".into(),
+            backend_dir_owned: false,
+            ..Default::default()
+        };
+        let config = BackendConfig::with_recorded_dir(&adopted);
+        assert!(config.owned, "an adopted folder no longer overrides the bundled backend");
+        assert_ne!(config.backend_dir(), "/home/x/Mini-Me");
 
         std::env::remove_var("MINIME_DATA_DIR");
         match real_home {
@@ -2360,10 +2355,6 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
 
-        // Recorded as adopted stays adopted across launches.
-        let (dir, owned) = resolve_project_dir(Some((PathBuf::from("/home/x/Mini-Me"), false)));
-        assert!(!owned);
-        assert_eq!(dir, PathBuf::from("/home/x/Mini-Me"));
 
         // An explicit environment variable is always somebody else's checkout.
         std::env::set_var("MINIME_BACKEND_DIR", "/srv/theirs");
@@ -2384,7 +2375,21 @@ mod tests {
         let (target, owned) = resolve_wsl_target(None).expect("wsl target");
         assert!(owned);
         assert_eq!(target.dir, owned_wsl_dir());
+        assert_eq!(target.distro, None, "`1` explicitly asks for the default distro");
+
+        // A named distro is used as given.
+        std::env::set_var("MINIME_BACKEND_WSL", "Ubuntu-24.04");
+        let (target, _) = resolve_wsl_target(None).expect("wsl target");
+        assert_eq!(target.distro.as_deref(), Some("Ubuntu-24.04"));
         std::env::remove_var("MINIME_BACKEND_WSL");
+
+        // Unset (Windows only) names the distro onboarding installs, never the default:
+        // Docker Desktop's `docker-desktop` becomes the default on a machine without Ubuntu,
+        // has no bash, and stays the default after Ubuntu is installed.
+        if cfg!(windows) {
+            let (target, _) = resolve_wsl_target(None).expect("wsl target");
+            assert_eq!(target.distro.as_deref(), Some(INSTALLED_DISTRO));
+        }
         // On the distro's own filesystem: a venv over /mnt/c is the placement that makes
         // everything feel broken.
         assert!(!owned_wsl_dir().starts_with("/mnt/"), "{}", owned_wsl_dir());

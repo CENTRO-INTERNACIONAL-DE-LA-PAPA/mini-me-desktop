@@ -86,10 +86,9 @@ pub enum Fix {
     },
     /// Something only a person can do — a login, a download, pasting a key.
     Manual(String),
-    /// Point the app at a checkout it found. Not a command but a settings write, and the
-    /// *right* answer when the user already has one: adopting takes a second, while
-    /// provisioning a second copy costs gigabytes and several minutes.
-    Adopt { label: &'static str, dir: String },
+    /// The model provider's API key, typed straight into the step. Onboarding renders a
+    /// masked field for it rather than sending the user to Settings, which the modal covers.
+    EnterKey,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -332,7 +331,16 @@ fn probe(argv: &[String]) -> Probe {
 /// in that case, rather than a permanent, uninformative Pass: every developer checkout would
 /// otherwise carry a step that can never say anything but "running from source", which is
 /// not a fact about *this machine's setup* the way the other eight rows are.
+///
+/// Also `None` for a backend the app does not own — one a developer pointed it at with
+/// `MINIME_BACKEND_DIR`/`MINIME_BACKEND_WSL_DIR`. That folder never carries the stamp, so it
+/// would always read as "older", and the only fix on offer, `setup_script()`, copies the
+/// bundle over every top-level entry of someone's own folder. Onboarding would also run it by
+/// itself from "Get Started".
 fn backend_build(config: &BackendConfig) -> Option<Check> {
+    if !config.owned {
+        return None;
+    }
     let bundled = bundled_backend_stamp()?;
     let installed = installed_backend_stamp(config);
     if installed.as_deref() == Some(bundled.as_str()) {
@@ -456,9 +464,8 @@ fn bundled_backend_stamp() -> Option<String> {
 
 /// What build of the backend is installed, read where the backend actually lives.
 ///
-/// One extra probe, and only on a machine that already has a checkout — the comment on
-/// `discover_checkout` is right that each `wsl.exe` call costs seconds, and this must never
-/// become one per candidate.
+/// One extra probe, and only on a machine that already has a checkout — each `wsl.exe` call
+/// costs seconds.
 fn installed_backend_stamp(config: &BackendConfig) -> Option<String> {
     let stamp = match &config.wsl {
         Some(_) => {
@@ -473,46 +480,6 @@ fn installed_backend_stamp(config: &BackendConfig) -> Option<String> {
     };
     let stamp = stamp.trim().to_string();
     (!stamp.is_empty()).then_some(stamp)
-}
-
-/// Look for a Mini-Me checkout somewhere other than where we are configured to find one.
-///
-/// Only ever **local to the machine the backend runs on**. A checkout on a Windows drive
-/// is deliberately not offered for adoption even though WSL can reach it at `/mnt/c`:
-/// running the venv over that mount is the placement that makes everything feel broken
-/// (see `owned_wsl_dir`). The setup script still *copies* from there, which is the right
-/// use of a Windows-side checkout — as a source, not as a home.
-fn discover_checkout(config: &BackendConfig) -> Option<String> {
-    let configured = config.backend_dir();
-    match &config.wsl {
-        Some(_) => {
-            // One probe for the whole list: each `wsl.exe` call costs seconds, so this
-            // must not become one per candidate.
-            let script = "for d in ~/Mini-Me ~/mini-me ~/Documents/Mini-Me \
-                          ~/.local/share/mini-me-desktop/backend; do \
-                          [ -f \"$d/langgraph.json\" ] && echo \"$d\" && break; done";
-            let found = probe(&config.shell_argv(script));
-            found
-                .stdout
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty() && *line != configured)
-                .map(str::to_string)
-        }
-        None => {
-            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-            let home = std::path::PathBuf::from(home);
-            [
-                home.join("Documents/Mini-Me"),
-                home.join("Documents/GitHub/Mini-Me"),
-                home.join("Mini-Me"),
-                std::path::PathBuf::from("../Mini-Me"),
-            ]
-            .into_iter()
-            .find(|dir| dir.join("langgraph.json").is_file() && dir.to_string_lossy() != configured)
-            .map(|dir| dir.to_string_lossy().into_owned())
-        }
-    }
 }
 
 /// Ask every question, in dependency order.
@@ -559,7 +526,12 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                     // to run the install again without the flag
                     // (microsoft/WSL#10646). That failure is indistinguishable from the
                     // state this button exists to escape.
-                    argv: elevated(&["wsl.exe", "--install", "-d", "Ubuntu"]),
+                    argv: elevated(&[
+                        "wsl.exe",
+                        "--install",
+                        "-d",
+                        crate::backend::INSTALLED_DISTRO,
+                    ]),
                     note: "Windows will ask for admin rights, then opens its own window — \
                            this app can't show its progress, so watch that window; may need \
                            a restart",
@@ -607,7 +579,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     //
     // Local execution's own module (`backend/local/__init__.py`) is checked here rather than
     // as a separate row: it ships inside this same checkout, arriving (or not) from the exact
-    // same git clone / `setup_script()` run as `langgraph.json` — the only way for the two to
+    // same `setup_script()` copy of the bundled backend as `langgraph.json` — the only way for the two to
     // disagree is a checkout old enough to predate the module's merge, or someone deleting one
     // file by hand. Neither is common enough to earn its own permanent line in a first-run
     // checklist; folded in here, it still gets caught and still gets the same reinstall fix.
@@ -624,55 +596,54 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 checks.push(Check::pass(
                     "checkout",
                     "Mini-Me backend",
-                    format!("installed and ready, in {}", config.backend_dir()),
+                    format!("set up and ready, in {}", config.backend_dir()),
                 ));
             } else {
+                // Reinstalling overwrites the checkout, so it is only offered for one the app
+                // provisioned. A folder a developer pointed the app at is theirs to change.
+                let fix = if config.owned {
+                    Fix::Run {
+                        label: "Reinstall the backend",
+                        argv: config.shell_argv(&config.setup_script()),
+                        note: "re-syncs the checkout — your API keys and conversations are \
+                               untouched",
+                    }
+                } else {
+                    Fix::Manual(format!(
+                        "{} was set with MINIME_BACKEND_DIR or MINIME_BACKEND_WSL_DIR, so the \
+                         app won't overwrite it. Replace it with a complete copy, or unset the \
+                         variable to use the backend bundled with the app",
+                        config.backend_dir()
+                    ))
+                };
                 checks.push(Check::failing(
                     "checkout",
                     "Mini-Me backend",
                     State::Fail,
                     format!(
-                        "installed in {}, but part of it is missing — the install looks \
-                         incomplete",
+                        "set up in {}, but part of it is missing — setup looks incomplete",
                         config.backend_dir()
                     ),
-                    vec![Fix::Run {
-                        label: "Reinstall the backend",
-                        argv: config.shell_argv(&config.setup_script()),
-                        note: "re-syncs the checkout — your API keys and conversations are \
-                               untouched",
-                    }],
+                    vec![fix],
                 ));
             }
             checks.extend(backend_build(config));
         } else {
-            // Offer to adopt an existing checkout *before* offering to install a second
-            // one. Someone who already has Mini-Me on this machine should not be made to
-            // provision a second copy — and adopting keeps their branches intact, because
-            // the app never runs destructive git on what it does not own.
-            let mut fixes = Vec::new();
-            let mut detail = "not installed on this machine yet".to_string();
-            if let Some(found) = discover_checkout(config) {
-                detail = format!("not installed yet, but an existing copy was found at {found}");
-                fixes.push(Fix::Adopt {
-                    label: "Use the one I have",
-                    dir: found,
-                });
-            }
-            fixes.push(Fix::Run {
-                label: "Install Mini-Me",
+            // Always the copy bundled with the app — there is no other backend to offer.
+            let fixes = vec![Fix::Run {
+                label: "Set up the backend",
                 argv: config.shell_argv(&config.setup_script()),
                 // The backend source ships bundled with this app now — copying it into WSL is
                 // instant. What actually takes time is `uv sync` pulling Python packages from
                 // PyPI, which is the only network step left in this fix.
                 note: "copies the bundled backend and installs its Python packages — a few \
                        minutes",
-            });
+            }];
             checks.push(Check::failing(
                 "checkout",
                 "Mini-Me backend",
                 State::Fail,
-                detail,
+                "not set up on this machine yet",
                 fixes,
             ));
         }
@@ -804,11 +775,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             "Model API key",
             State::Fail,
             "you haven't added an API key for the selected AI provider yet",
-            vec![Fix::Manual(
-                "Open Settings and paste your key — it goes into the OS keychain, never \
-                 into a file."
-                    .into(),
-            )],
+            vec![Fix::EnterKey],
         ));
     }
 
@@ -1135,7 +1102,9 @@ fn decode(bytes: &[u8], wide: bool) -> String {
 /// is what counts: reaching the `exit 0` below means `Start-Process` got as far as running
 /// the program and waiting for it, and `judge_finished_fix` is what turns that into "restart
 /// your machine" rather than a false "done". A refused UAC prompt never reaches that line —
-/// `Start-Process -Verb RunAs` throws before it, which still surfaces as a failure here.
+/// `Start-Process` raises a *non-terminating* error there, which under `-Command` would fall
+/// straight through to `exit 0`, so `-ErrorAction Stop` makes it terminating and the `catch`
+/// exits 1.
 ///
 
 /// **This elevates the real program directly — no `cmd.exe`, no redirection, no output
@@ -1171,7 +1140,8 @@ fn elevated(argv: &[&str]) -> Vec<String> {
     // Single-quoted for PowerShell, doubling any quote inside — nothing here contains one
     // today, and a future path must not be able to break out of the string.
     let script = format!(
-        "Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait; exit 0",
+        "try {{ Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait \
+         -ErrorAction Stop }} catch {{ exit 1 }}; exit 0",
         program.replace('\'', "''"),
         args.replace('\'', "''"),
     );
@@ -1567,6 +1537,17 @@ mod tests {
     }
 
     #[test]
+    fn a_backend_the_app_does_not_own_is_never_offered_the_overwriting_update() {
+        // A folder set by environment variable carries no stamp, so the build row would always
+        // fail — and its fix copies the bundle over the developer's own files.
+        let adopted = BackendConfig {
+            owned: false,
+            ..config()
+        };
+        assert_eq!(backend_build(&adopted), None);
+    }
+
+    #[test]
     fn a_missing_checkout_is_reported_with_the_command_that_fixes_it() {
         let _env = crate::backend::env_lock::hold();
         let report = inspect(&config(), true);
@@ -1662,6 +1643,14 @@ mod tests {
         };
         assert_eq!(state(&with), Some(State::Pass));
         assert_eq!(state(&without), Some(State::Fail));
+        // Asked for in place: the onboarding modal covers Settings, so "open Settings" was a
+        // dead end for a first-time user.
+        let fixes = without
+            .checks
+            .iter()
+            .find(|check| check.id == "model-key")
+            .map(|check| check.fixes.clone());
+        assert_eq!(fixes, Some(vec![Fix::EnterKey]));
     }
 
     #[test]
@@ -1855,8 +1844,11 @@ mod encoding_tests {
             // `RunAs` is the UAC prompt; `-Wait` makes "finished" mean finished. `exit 0`
             // rather than `wsl.exe`'s own exit code: that code is not a reliable signal for
             // `wsl --install`, so the elevated window closing at all is treated as success. A
-            // refused UAC prompt still fails, because `Start-Process` throws before this line.
+            // refused UAC prompt still fails: `-ErrorAction Stop` turns its non-terminating
+            // error into one the `catch` sees, instead of falling through to `exit 0`.
             assert!(script.contains("-Verb RunAs"), "{script}");
+            assert!(script.contains("-ErrorAction Stop"), "{script}");
+            assert!(script.contains("catch { exit 1 }"), "{script}");
             assert!(script.contains("-Wait"), "{script}");
             assert!(script.contains("exit 0"), "{script}");
             // The real, signed binary is elevated directly — not `cmd.exe`, and not a

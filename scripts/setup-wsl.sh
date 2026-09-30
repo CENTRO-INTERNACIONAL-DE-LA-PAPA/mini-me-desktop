@@ -16,13 +16,11 @@
 #   Usage:  bash setup-wsl.sh [target-dir]
 #           default target: ~/.local/share/mini-me-desktop/backend
 #
-#   MINIME_BUNDLED_SOURCE   a Mini-Me copy shipped with the app, to copy from
-#                           instead of cloning (see "where the source comes from")
-#   MINIME_REPO_URL         override the git remote
+#   MINIME_BUNDLED_SOURCE   the Mini-Me backend shipped with the app — the only
+#                           source this script installs from
 
 set -euo pipefail
 
-REPO_URL="${MINIME_REPO_URL:-https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me.git}"
 DIR="${1:-$HOME/.local/share/mini-me-desktop/backend}"
 # Expand a leading ~ if the caller passed one through as a literal.
 DIR="${DIR/#\~/$HOME}"
@@ -75,32 +73,15 @@ ok "uv $(uv --version | awk '{print $2}')"
 
 # ------------------------------------------------- where the source comes from
 #
-# In preference order, and the order matters:
-#
-#   1. A copy bundled with the app. THIS IS THE ONE THAT MATTERS for a real
-#      install: Mini-Me is a *private* repository, so `git clone` demands
-#      credentials that GitHub only issues as a personal access token — something
-#      no scientist should have to create in order to open an app. The backend is
-#      `mini-me/`, tracked directly in this repository, so `scripts/package.sh`
-#      bundles it with no separate step, and this path is free.
-#   2. A checkout already on this machine — copied, not downloaded again.
-#   3. A checkout on the Windows side, same.
-#   4. git clone. The developer path, and the only one that can ask for a
-#      password, which is why it is last.
+# Only ever the copy bundled with the app. `scripts/package.sh` ships `mini-me/` inside
+# the app, so there is nothing to download and nothing to ask a password for. A copy the
+# script merely *found* elsewhere on the machine is not a source: it may be someone's
+# working tree, and it is not the version this app was built against.
 find_source() {
-  local candidate
   if [ -n "${MINIME_BUNDLED_SOURCE:-}" ] && [ -f "${MINIME_BUNDLED_SOURCE}/langgraph.json" ]; then
     printf '%s' "$MINIME_BUNDLED_SOURCE"
     return 0
   fi
-  for candidate in \
-      "$HOME/Mini-Me" "$HOME/mini-me" "$HOME/Documents/Mini-Me" \
-      /mnt/c/Users/*/Documents/GitHub/Mini-Me /mnt/c/Users/*/Documents/Mini-Me; do
-    if [ -f "$candidate/langgraph.json" ] && [ "$candidate" != "$DIR" ]; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-  done
   return 1
 }
 
@@ -108,6 +89,22 @@ find_source() {
 # checkout, which is the signal that this source is somebody's working tree and must not be
 # copied over anything.
 stamp_of() { [ -f "$1/.bundled-backend" ] && cat "$1/.bundled-backend" || true; }
+
+# Copy the source's *contents* into $DIR, leaving out what belongs to the machine it came from.
+#
+# A released bundle has none of these — `scripts/package.sh` prunes them. Running from source,
+# `MINIME_BUNDLED_SOURCE` is the developer's own `mini-me/`, and its Windows `.venv` alone is
+# over a gigabyte in ~40k files. Copied across `/mnt/c`, that held onboarding on "Copying
+# Mini-Me…" for ten minutes, only for the fresh-install path to delete it straight after. tar
+# rather than `cp`, because it can exclude, and the trailing `.` copies contents either way.
+copy_source() {
+  local dest="${2:-$DIR}"
+  mkdir -p "$dest"
+  tar -C "$1" \
+      --exclude=./.venv --exclude=./.env --exclude=./.git --exclude=./.langgraph_api \
+      --exclude=node_modules --exclude=__pycache__ --exclude=.pytest_cache \
+      -cf - . | tar -C "$dest" -xf -
+}
 
 if [ -f "$DIR/langgraph.json" ]; then
   # **Already installed is not the same as up to date**, and for a long time this script
@@ -117,8 +114,8 @@ if [ -f "$DIR/langgraph.json" ]; then
   # version of `read_search_results` that had been fixed nine days earlier, and the claims
   # recorder built for it was not on the machine at all (docs §283).
   #
-  # Only when the source carries a stamp, so a developer checkout adopted with `Use the one
-  # I have` is never overwritten — it may hold real work (§144).
+  # Only when the source carries a stamp: a developer running from source has an unstamped
+  # `mini-me/`, and that is not a newer build to copy over anything.
   UPDATED=no
   if SOURCE="$(find_source)"; then
     BUNDLED="$(stamp_of "$SOURCE")"
@@ -138,7 +135,7 @@ if [ -f "$DIR/langgraph.json" ]; then
         esac
         rm -rf "${DIR:?}/$name"
       done
-      cp -r "$SOURCE/." "$DIR/"
+      copy_source "$SOURCE"
       if [ ! -f "$DIR/pyproject.toml" ]; then
         bad "the update did not bring pyproject.toml — $SOURCE may be incomplete"
         exit 1
@@ -155,21 +152,38 @@ else
   if [ -d "$DIR" ] && [ -z "$(ls -A "$DIR" 2>/dev/null)" ]; then rmdir "$DIR"; fi
 
   if SOURCE="$(find_source)"; then
-    say "Copying Mini-Me from $SOURCE"
-    echo "    (faster than downloading, and it needs no password)"
+    say "Copying Mini-Me from the copy bundled with this app"
     # `cp -r SRC DEST` means two different things depending on whether DEST exists: it *becomes*
     # SRC when it does not, and gains a `DEST/<basename SRC>` when it does. So a `$DIR` left
     # behind non-empty by an interrupted run — or by anything else — turned the copy into
     # `$DIR/mini-me/pyproject.toml`, and `uv sync` two steps later reported
     # "No `pyproject.toml` found in current directory or any parent directory" while the copy
-    # above it said `ok`. Trailing `/.` copies the *contents*, which means one thing only.
-    mkdir -p "$DIR"
-    cp -r "$SOURCE/." "$DIR/"
+    # above it said `ok`. `copy_source` copies the *contents*, which means one thing only.
+    #
+    # **Staged, then moved into place.** The slow part — reading across `/mnt/c` — used to write
+    # straight into `$DIR`, and the app's backend launch mirrors `backend/` into `$DIR` too, by
+    # deleting and replacing it. A launch during the copy (at app start, or after a retry) swapped
+    # `backend/` out from under it: tar failed with "Cannot mkdir: No such file or directory" and
+    # "Cannot open: File exists", and a half-copied tree with `langgraph.json` passed for an
+    # install on the next run. Until the move, `$DIR` does not exist, so a launch's mirror has
+    # nothing to write into, and an interrupted copy leaves only the staging folder behind.
+    STAGE="$DIR.partial"
+    rm -rf "$STAGE"
+    copy_source "$SOURCE" "$STAGE"
     # Said out loud, because the failure above was silent for exactly as long as it took to
     # reach a step that needed a file: the copy reported success either way.
-    if [ ! -f "$DIR/pyproject.toml" ]; then
+    if [ ! -f "$STAGE/pyproject.toml" ]; then
       bad "the copy did not bring pyproject.toml — $SOURCE may be incomplete"
       exit 1
+    fi
+    if [ -e "$DIR" ]; then
+      # Left by an interrupted run of an older version of this script, and it may hold this
+      # machine's `.env` or conversations — so merged into, never deleted. Local disk to local
+      # disk, so this takes a second, not the minutes the staging copy did.
+      cp -a "$STAGE/." "$DIR/"
+      rm -rf "$STAGE"
+    else
+      mv "$STAGE" "$DIR"
     fi
     # A copied .venv holds the *other* machine's compiled packages — Windows
     # Scripts/*.exe, or wheels built for a different Python. Unusable here.
@@ -179,12 +193,9 @@ else
     fi
     ok "copied to $DIR"
   else
-    say "Downloading Mini-Me"
-    echo "    This is a private repository, so git will ask who you are."
-    echo "    GitHub does NOT accept your account password here — it wants a"
-    echo "    personal access token. If you are reading this inside the app, the"
-    echo "    backend was not bundled with your copy: ask whoever gave it to you."
-    git clone "$REPO_URL" "$DIR"
+    bad "this copy of the app has no backend bundled with it"
+    echo "    Reinstall the app from the latest release, or ask whoever gave it to you."
+    exit 1
   fi
 fi
 
@@ -199,7 +210,7 @@ cd "$DIR"
 # Git reads it and keeps future checkouts inside WSL at LF. Git also caches the old clean filter in
 # its index, so a guarded `--renormalize` is required once after changing the policy. It runs only
 # when every unstaged difference is a CR at end-of-line; a real edit leaves the tree untouched.
-# Do not `reset --hard`: find_source may have copied a developer checkout with real work (§144).
+# Do not `reset --hard`: a developer's bundle may be a working tree with real work (§144).
 if git -C "$DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git -C "$DIR" config core.autocrlf input
   if ! git -C "$DIR" diff --quiet -- && \
