@@ -1081,15 +1081,17 @@ enum Section {
     Model,
     Research,
     Backend,
+    Help,
 }
 
 impl Section {
     /// In rail order.
-    const ALL: [Section; 4] = [
+    const ALL: [Section; 5] = [
         Section::Appearance,
         Section::Model,
         Section::Research,
         Section::Backend,
+        Section::Help,
     ];
 
     fn label(self) -> &'static str {
@@ -1098,6 +1100,7 @@ impl Section {
             Section::Model => "Model",
             Section::Research => "Research",
             Section::Backend => "Backend",
+            Section::Help => "Help",
         }
     }
 
@@ -1107,6 +1110,7 @@ impl Section {
             Section::Model => "model",
             Section::Research => "research",
             Section::Backend => "backend",
+            Section::Help => "help",
         }
     }
 }
@@ -1260,6 +1264,7 @@ enum Command {
     RenderReport,
     FileInProject,
     OpenAbout,
+    OpenManual,
     OpenProvenance,
     OpenSettings,
     OpenOnboarding,
@@ -1267,7 +1272,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 17] = [
+    const ALL: [Command; 18] = [
         Command::RunTurn,
         Command::NewThread,
         Command::RefreshSpine,
@@ -1281,6 +1286,7 @@ impl Command {
         Command::RenderReport,
         Command::FileInProject,
         Command::OpenAbout,
+        Command::OpenManual,
         Command::OpenProvenance,
         Command::OpenSettings,
         Command::OpenOnboarding,
@@ -1302,6 +1308,7 @@ impl Command {
             Command::RenderReport => "Save the latest report as a PDF",
             Command::FileInProject => "Put this conversation in a project",
             Command::OpenAbout => "About Mini-Me",
+            Command::OpenManual => "User manual",
             Command::OpenProvenance => "Show this conversation's provenance",
             Command::OpenSettings => "Settings",
             Command::OpenOnboarding => "Run setup checks",
@@ -1326,6 +1333,7 @@ impl Command {
             Command::OpenAbout => {
                 "what the specialists do, where the data comes from, how to cite it"
             }
+            Command::OpenManual => "how to use Mini-Me, in your browser",
             Command::OpenProvenance => "which specialists were consulted, and in what order",
             Command::OpenSettings => "model, keys, execution (ctrl-,)",
             Command::OpenOnboarding => "re-run the install checks and fixes shown on first launch",
@@ -7234,6 +7242,7 @@ impl Workbench {
                 self.about_open = true;
                 cx.notify();
             }
+            Command::OpenManual => self.open_manual(cx),
             Command::OpenProvenance => {
                 self.provenance_open = true;
                 cx.notify();
@@ -7241,6 +7250,23 @@ impl Workbench {
             Command::OpenSettings => self.open_settings(None, cx),
             Command::OpenOnboarding => self.open_onboarding(cx),
             Command::Quit => cx.quit(),
+        }
+    }
+
+    /// Open the user manual that ships with this build, in the default browser.
+    ///
+    /// The packaged `manual/index.html` rather than a URL: it works offline and always describes
+    /// the version installed — the same reason the backend ships beside the executable.
+    pub(crate) fn open_manual(&mut self, cx: &mut Context<Self>) {
+        match backend::manual_index() {
+            Some(index) => match workspace::open(&index) {
+                Ok(()) => self.say("opened the user manual in your browser", cx),
+                Err(error) => {
+                    tracing::warn!(%error, "could not open the user manual");
+                    self.say(format!("could not open the user manual: {error}"), cx);
+                }
+            },
+            None => self.say("this build does not include the user manual", cx),
         }
     }
 

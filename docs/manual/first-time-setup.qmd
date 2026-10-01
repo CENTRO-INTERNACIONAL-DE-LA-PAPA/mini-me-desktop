@@ -1,0 +1,179 @@
+# First-time setup
+
+The first time you open Mini-Me, a window called **GET STARTED** appears. It checks your
+computer and installs everything Mini-Me needs. **You only have to press one button** — the app
+does the rest and stops only when it needs you.
+
+::: {.image-placeholder}
+**File:** `images/setup-get-started.png`\
+**Show:** The GET STARTED window as it first appears, with the list of steps and the
+*Get Started* button.
+:::
+<!-- ![The Get Started window](images/setup-get-started.png) -->
+
+## Before you start
+
+- Make sure you are **connected to the internet**.
+- Have your **API key** ready (see [What is an API key?](glossary.qmd#api-key)).
+- Set aside about **15–30 minutes**. Most of that time is the computer downloading things.
+- Your computer may need to **restart once**. Save any other work first.
+
+## How it works
+
+1. Click **Get Started**.
+2. The app goes through the list of steps from top to bottom.
+   - A step that is running shows its progress right underneath it.
+   - A finished step shrinks to a single line with a tick (✓).
+3. When a step needs you (for example, to sign in or paste a key), the app **pauses** and tells
+   you what to do. Do it, then click **Continue**.
+4. When every required step is done, the window says **Ready to run** and the button changes
+   to **Done**. Click it and you can start working.
+
+::: {.callout-tip}
+Steps marked **Optional** can be skipped. Mini-Me still works without them, but some features
+won't be available. You can come back to them at any time (see
+[Running the setup again](#running-the-setup-again)).
+:::
+
+## The steps, one by one
+
+### 1. Linux support for Windows (WSL)
+
+**What it is:** Mini-Me's "engine" runs inside a small Linux system that Windows can host,
+called **WSL**. You never have to use it directly.
+
+**What you do:**
+
+- If it is missing, the app offers **Install WSL** or **Install Ubuntu**.
+- Windows asks for **administrator permission** — click **Yes**.
+- A **separate black window** opens and shows the installation. Mini-Me can't show this
+  progress itself, so **watch that window** until it finishes.
+- If Ubuntu asks you to **create a username and password**, choose any you like and write
+  them down. (They are only for this Linux system, not your Windows account.)
+- Windows may ask you to **restart**. After restarting, open Mini-Me again; the setup continues
+  where it stopped.
+
+::: {.image-placeholder}
+**File:** `images/setup-wsl-window.png`\
+**Show:** The separate black installation window that opens while WSL / Ubuntu installs.
+:::
+<!-- ![The WSL installation window](images/setup-wsl-window.png) -->
+
+### 2. Mini-Me backend
+
+**What it is:** the part of Mini-Me that does the actual research work.
+
+**What you do:** nothing. The app copies it into place and installs what it needs. This
+takes **a few minutes**. You will see lines of text scrolling under the step — that is normal.
+
+### 3. Python dependencies
+
+**What it is:** extra tools the backend uses (for statistics, charts, and so on).
+
+**What you do:** nothing. This is usually done as part of the step above.
+
+### 4. Conversation storage
+
+**What it is:** makes sure your conversations are **saved to disk**, so you don't lose them
+when you close the app.
+
+**What you do:** nothing, unless it shows a problem. If it does, click
+**Save conversations to disk**.
+
+### 5. Model API key
+
+**What it is:** the key that lets Mini-Me use an AI company's model. Without it, Mini-Me can't
+answer questions.
+
+**What you do:**
+
+1. Copy your API key (from the email or page where you got it).
+2. Click in the box and **paste** it (`Ctrl+V`).
+3. Click **Save key**.
+
+Your key is kept safely in **Windows' own password store** (Credential Manager) — never in a
+normal file.
+
+::: {.image-placeholder}
+**File:** `images/setup-api-key.png`\
+**Show:** The *Model API key* step with the paste box and the *Save key* button.
+:::
+<!-- ![Paste your API key and click Save key](images/setup-api-key.png) -->
+
+::: {.callout-note}
+The setup asks for a key for the AI company that is selected by default. If your key is from a
+different company, click **Skip this step**, finish the setup, and then add the key in
+[Settings → Model](settings.qmd#model).
+:::
+
+### 6. Asta (optional, recommended)
+
+**What it is:** **Asta** is a service from the Allen Institute for AI. Mini-Me uses it to
+**search scientific papers**, read PDFs, and generate research ideas.
+
+**What you do:**
+
+1. The app may first install the Asta tool by itself (about a minute).
+2. Then it asks you to **sign in**. A short **code** appears in large letters, with a button
+   **Open the sign-in page**.
+3. Click the button. Your web browser opens the Asta sign-in page.
+4. Type or check the code, and sign in with your account.
+5. Go back to Mini-Me — it notices the sign-in by itself and continues.
+
+::: {.image-placeholder}
+**File:** `images/setup-asta-signin.png`\
+**Show:** The Asta step with the large sign-in code and the *Open the sign-in page* and
+*Copy* buttons.
+:::
+<!-- ![Signing in to Asta](images/setup-asta-signin.png) -->
+
+::: {.callout-tip}
+If the browser doesn't open, click **Copy ⧉** next to the button and paste the link into your
+browser yourself.
+:::
+
+If the step says your account **"can't generate research theories"**, literature search still
+works. Only the idea-generation feature needs extra permission — ask your team lead which Asta
+account to use, then click **Sign in again**.
+
+### 7. CIP Dataverse (optional, recommended)
+
+**What it is:** the **CIP Dataverse** is CIP's catalogue of research datasets. Signing in lets
+Mini-Me search it for you.
+
+**What you do:** click **Sign in to CIP Dataverse**. A browser page opens — sign in with your
+**CIP account**. Then return to Mini-Me.
+
+::: {.callout-warning}
+If you skip this step, Mini-Me **won't find any datasets** when you ask it to search the
+Dataverse.
+:::
+
+## Buttons at the bottom of the window
+
+| Button | What it does |
+|---|---|
+| **Get Started** | Starts going through all the steps automatically. |
+| **Working…** | Shown while the app is busy. Just wait. |
+| **Continue** | Use it after you have done something the app asked you to do (for example, sign in). |
+| **Retry** | Shown when a step failed. Tries that step again. |
+| **Re-check instead** | Checks your computer again without running anything. |
+| **Done** | Everything required is ready. Closes the window. |
+| **Skip for now** | Closes the setup. You can open it again later (see below). |
+| **Stop** | Stops the step that is running right now. |
+
+## Running the setup again {#running-the-setup-again}
+
+You can open the setup window again at any time, for example to sign in to Asta again or to
+finish a step you skipped:
+
+- Open **Settings** (`Ctrl+,`) → **Backend** → **Run setup checks**, or
+- Press `Ctrl+P`, type **setup**, and choose **Run setup checks**.
+
+Mini-Me also opens it by itself if something essential stops working.
+
+## If a step fails
+
+- Read the message under the step — it usually says what went wrong in plain words.
+- Click **Retry** to try that step again.
+- If it still fails, see [Troubleshooting](troubleshooting.qmd).

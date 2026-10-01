@@ -1,0 +1,60 @@
+# A tour of the window
+
+The Mini-Me window has **three main areas** and a bar along the bottom.
+
+![The Mini-Me window](images/window-overview.png)
+
+## ① The left sidebar — your conversations
+
+This is where you find your work.
+
+- **Conversations** tab: every conversation you have started, newest first.
+- **Projects** tab: groups of conversations about the same topic. See
+  [Projects and conversations](projects.qmd).
+- **Search box**: type a few words to find an old conversation.
+- **+ button**: start a **New conversation** or a **New project…**
+
+You can hide or show the sidebar with the button at its top, and make it wider or narrower by
+dragging its edge.
+
+## ② The chat — where you talk to Mini-Me
+
+This is the main area.
+
+- At the **bottom** is the box where you type your question.
+- Above it, Mini-Me's answers appear as they are written, like a chat.
+- Each answer shows **which specialist** did the work and how many **steps** it took. Click the
+  steps to see what happened.
+
+See [Asking questions](asking-questions.qmd).
+
+## ③ The Pinboard — your results
+
+The panel on the right collects everything this conversation has produced, so you don't have to
+scroll through the chat to find it:
+
+- **Mission** — what the project is about.
+- **Completed** and **Pending** — work already done and work still to do.
+- **Plan** — the steps Mini-Me is following for the current question.
+- **Background Jobs** — long tasks that are still running.
+- **Files** — charts, cleaned data, reports and other files.
+- **Sources** — the papers and references that were used.
+
+You can hide or show the Pinboard with the button at its top. See
+[Your results](results.qmd).
+
+## ④ The bottom bar
+
+The thin bar at the bottom of the window shows short status messages (for example, "sign-in
+link copied"), reminds you that **`Ctrl+P` opens the command list**, and shows the update button
+when a new version is ready.
+
+## The command list (`Ctrl+P`)
+
+Press **`Ctrl+P`** at any time to open a search box with everything Mini-Me can do — for
+example *Settings*, *Save the latest report as a PDF*, or *Restart the backend*. Start typing,
+use the arrow keys to pick one, and press **Enter**.
+
+![The command list](images/window-command-palette.png)
+
+See [Keyboard shortcuts](shortcuts.qmd) for the full list.

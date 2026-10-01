@@ -1,0 +1,76 @@
+# Projects and conversations
+
+## Conversations
+
+A **conversation** is one chat with Mini-Me. Everything in it — your questions, the answers, your
+files and the results — stays together, and Mini-Me remembers what was said earlier when you
+ask follow-up questions.
+
+**To start a new conversation:** click the **+** button at the top of the left sidebar and
+choose **New conversation**.
+
+**To go back to an old one:** click it in the **Conversations** tab, or type a few words in the
+search box to find it.
+
+**To rename or delete a conversation:** point at it in the sidebar, click the **⋮** menu next to
+it, and choose **Rename** or **Delete**.
+
+![A conversation's menu](images/projects-conversation-menu.png)
+
+::: {.callout-warning}
+**Deleting cannot be undone.** It removes the conversation, its chat history and every file it
+produced.
+:::
+
+## Projects
+
+A **project** groups several conversations about the same topic — for example, *"Sweet potato
+drought study"*. All conversations in a project share the project's **mission** and progress
+list, and their files are kept together in one folder.
+
+**To create a project:** click **+** at the top of the sidebar → **New project…**, then type a
+name.
+
+**To put a conversation into a project:** open the conversation, press **`Ctrl+P`**, choose
+**Put this conversation in a project**, and pick the project.
+
+**To start a new conversation inside a project:** in the **Projects** tab, open the project's
+**⋮** menu and choose **New conversation in *project name***.
+
+**Other options** in the project's **⋮** menu:
+
+- **Open folder** — opens the project's folder in Windows File Explorer.
+- **Delete project** — permanently deletes the project, *all* its conversations and its whole
+  folder (including any files you put there yourself). There is no undo.
+
+![The Projects tab](images/projects-tab.png)
+
+## The mission
+
+At the top of the [Pinboard](results.qmd) is the **Mission**: one or two sentences saying what
+the project is about. Mini-Me reads it **every time** you ask something, so a clear mission
+gives better answers.
+
+- If you don't write one, Mini-Me takes it from your **first question**.
+- **To change it:** click the mission text (or the pencil ✏️ next to *Mission*), type the new
+  text, and press **Enter** to save. Press **Esc** to cancel.
+
+![Editing the mission](images/projects-mission-edit.png)
+
+Under the mission you will see **Completed** (✓, work already done) and **Pending** (○, work
+still to do), which Mini-Me keeps up to date as you go.
+
+## Where your files are saved
+
+Everything Mini-Me makes is saved as normal files in your **Documents** folder:
+
+```
+Documents\Mini-Me\
+```
+
+Each conversation has its own folder there (inside its project's folder, if it belongs to one).
+To open the current conversation's folder, click the **Local Workspace** link near the top of
+the chat. You can open these files with your usual programs (Excel, Word, a PDF reader…), copy them, or
+back them up like any other file.
+
+![Local Workspace](images/local-workspace.png)

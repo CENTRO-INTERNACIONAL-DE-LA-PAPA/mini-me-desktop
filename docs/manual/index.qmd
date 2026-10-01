@@ -1,0 +1,54 @@
+# Welcome {.unnumbered}
+
+![](images/welcome-hero.png){fig-alt="The Mini-Me Desktop window"}
+
+## What is Mini-Me?
+
+**Mini-Me** is a research assistant that runs on your Windows computer. You talk to it the
+same way you would write a message to a colleague, and it does the research work for you:
+
+- **Finds scientific papers** on a topic and summarises what they say, with references.
+- **Finds datasets** in the CIP Dataverse.
+- **Reads your own PDFs** and lets you search them by meaning, not just by words.
+- **Checks and cleans your data files** (for example, an Excel or CSV file).
+- **Analyses your data** — patterns, charts, statistics and predictions.
+- **Suggests and tests ideas** (hypotheses) based on the literature.
+- **Writes a report** with references, which you can save as a PDF.
+
+Behind the scenes, Mini-Me has a team of **specialists** — each one good at a single job. You
+don't need to know which one to ask: a **coordinator** reads your question and passes it to the
+right specialist for you.
+
+## Who is this manual for?
+
+For everyone. You do **not** need to know how to program, use a terminal or install software
+by hand. If you can use email and a web browser, you can use Mini-Me.
+
+## How to read this manual
+
+Mini-Me should already be installed and set up on your computer. If this is your first time,
+read these chapters in order:
+
+1. [A tour of the window](the-window.qmd) — what each part of the screen is for.
+2. [Asking questions](asking-questions.qmd) — how to get your first answer.
+
+After that, use the other chapters when you need them.
+
+::: {.callout-tip title="Opening this manual from Mini-Me"}
+You can open this manual at any time from inside the app: go to **Settings → Help → Open user
+manual**, or press `Ctrl+P` and choose **User manual**.
+:::
+
+::: {.callout-important title="Please keep in mind"}
+Mini-Me uses **generative AI**. It is a helpful assistant, but it can make mistakes.
+
+- **Check the results** with a subject-matter expert before you rely on them.
+- **Check every reference** before you cite it in your own work.
+- **Do not enter confidential or personal data**, unpublished research or third-party
+  intellectual property.
+- **Say that you used AI** when you share or publish work made with Mini-Me.
+:::
+
+::: {.callout-note title="About this manual"}
+This manual was drafted with the help of generative AI.
+:::

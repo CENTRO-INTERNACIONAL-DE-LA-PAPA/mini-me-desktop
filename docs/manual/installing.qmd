@@ -1,0 +1,143 @@
+# Installing Mini-Me
+
+## What you need
+
+- A computer with **Windows 10 or Windows 11**.
+- An **internet connection** (the first setup downloads a few things).
+- **Administrator rights**, *only during installation and the first setup*: you need to be able
+  to open **PowerShell as administrator**. If you can't, ask your IT team to be there.
+- An **API key** from an AI company (for example OpenAI, Anthropic or Google). This is like a
+  password that lets Mini-Me use that company's AI. Your team lead or IT team can tell you which
+  one to use. See [What is an API key?](glossary.qmd#api-key)
+
+## Step 1 — Download the app
+
+1. You will receive Mini-Me as a **.zip file** (a compressed folder), for example
+   `mini-me-desktop-v0.3.39-windows-x64.zip`.
+2. Save it in your **Downloads** folder (most browsers do this automatically). The install
+   command in the next step looks for it there.
+
+## Step 2 — Install it into Program Files {#program-files}
+
+Mini-Me **only works from this folder**:
+
+```
+C:\Program Files\mini-me-desktop
+```
+
+It won't start properly from Downloads, Documents, the Desktop or anywhere else. Windows doesn't
+let you copy files into Program Files the normal way, so we use **PowerShell as administrator**
+to put it there. You don't need to unzip the file yourself — the command below does it for you.
+
+### Open PowerShell as administrator
+
+1. Click the **Start** button and type **PowerShell**.
+2. **Right-click** *Windows PowerShell* and choose **Run as administrator**.
+3. Windows asks *"Do you want to allow this app to make changes to your device?"* — click
+   **Yes**.
+4. A blue (or black) window opens. Its title starts with **Administrator:**.
+
+::: {.image-placeholder}
+**File:** `images/install-powershell-admin.png`\
+**Show:** The Start menu with *PowerShell* searched and the right-click menu showing
+*Run as administrator*.
+:::
+<!-- ![Opening PowerShell as administrator](images/install-powershell-admin.png) -->
+
+### Run the install command
+
+1. **Copy** the command below (click the copy icon in its top-right corner).
+2. Click inside the PowerShell window and **right-click** to paste it.
+3. Press **Enter**.
+
+```powershell
+$zip = Get-ChildItem "$env:USERPROFILE\Downloads\mini-me-desktop-*-windows-x64.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$unzipped = "$env:USERPROFILE\Downloads\mini-me-desktop-install"
+if (Test-Path $unzipped) { Remove-Item $unzipped -Recurse -Force }
+Expand-Archive -Path $zip.FullName -DestinationPath $unzipped
+if (Test-Path "C:\Program Files\mini-me-desktop") { Remove-Item "C:\Program Files\mini-me-desktop" -Recurse -Force }
+Move-Item "$unzipped\mini-me-desktop" "C:\Program Files\"
+Remove-Item $unzipped -Recurse -Force
+Write-Host "Mini-Me installed from $($zip.Name)"
+```
+
+This finds the newest Mini-Me .zip in your **Downloads** folder, unpacks it there, and then
+**moves** the app into Program Files. If an older copy of Mini-Me is already in Program Files,
+it is replaced. Your conversations, files and settings are **not** stored there, so they are
+kept. When it finishes, it prints **Mini-Me installed from …**. You can then close the
+PowerShell window.
+
+::: {.callout-note}
+The app is **moved** into Program Files rather than unpacked straight into it on purpose. A
+moved folder keeps the permissions it had in your Downloads folder, and Mini-Me needs those to
+update itself later.
+:::
+
+::: {.image-placeholder}
+**File:** `images/install-powershell-done.png`\
+**Show:** The administrator PowerShell window after running the command, ending with the
+*Mini-Me installed from …* line.
+:::
+<!-- ![The install command finished](images/install-powershell-done.png) -->
+
+::: {.callout-tip title="If you see red text"}
+- *"Cannot bind argument to parameter 'Path' because it is null"* — the .zip is not in your
+  **Downloads** folder. Move it there and run the command again.
+- *"Access is denied"* — PowerShell was not opened **as administrator**. Close it and start
+  again from *Open PowerShell as administrator*.
+- If Mini-Me was open, close it first and run the command again.
+:::
+
+When you're done, the app is here:
+
+```
+C:\Program Files\mini-me-desktop\mini-me-desktop-app.exe
+```
+
+::: {.callout-warning title="Important"}
+- Don't move the `mini-me-desktop` folder, or the `.exe` inside it, anywhere else. Use a
+  [shortcut](#tip-make-a-shortcut) instead.
+- You can delete the .zip from your Downloads folder afterwards.
+:::
+
+## Step 3 — Open the app for the first time {#first-open}
+
+1. Open File Explorer, go to `C:\Program Files\mini-me-desktop` and **double-click** `mini-me-desktop-app.exe`.
+2. Windows may show a blue box saying **"Windows protected your PC"**. This is normal: Windows
+   shows this for any new program it has not seen before.
+3. Click **More info**, then click **Run anyway**.
+
+::: {.image-placeholder}
+**File:** `images/install-smartscreen.png`\
+**Show:** The blue "Windows protected your PC" box, with the *More info* link and the
+*Run anyway* button visible.
+:::
+<!-- ![Click More info, then Run anyway](images/install-smartscreen.png) -->
+
+The app opens and starts the **Get Started** guide. Continue with
+[First-time setup](first-time-setup.qmd).
+
+## Tip — make a shortcut {#tip-make-a-shortcut}
+
+To open Mini-Me more easily next time, make a shortcut on your Desktop. **Don't move or copy
+the app itself** out of Program Files.
+
+1. In `C:\Program Files\mini-me-desktop`, right-click `mini-me-desktop-app.exe`.
+2. Choose **Show more options → Create shortcut** (on Windows 10, just **Create shortcut**).
+3. Windows says it can't create the shortcut there and offers to put it **on the desktop
+   instead** — click **Yes**.
+
+You can now open Mini-Me from the shortcut on your Desktop.
+
+## Updating Mini-Me
+
+You don't need to download new versions by hand. When a new version is available, a button
+appears at the bottom of the window (for example **Download 0.4.0**). Click it to download the
+update, then click
+**Restart to Update**. Your conversations and files are kept.
+
+::: {.image-placeholder}
+**File:** `images/install-update-button.png`\
+**Show:** The bottom bar of the app with the update / *Restart to Update* button.
+:::
+<!-- ![The update button in the bottom bar](images/install-update-button.png) -->

@@ -1012,6 +1012,19 @@ impl Workbench {
             ));
         }
 
+        if section == Section::Help {
+            pane = pane.child(ui::setting_row(
+                "User manual",
+                "Step-by-step help for everything in Mini-Me. Opens in your browser.",
+                ui::Button::new("open-manual")
+                    .text("Open user manual")
+                    .style(ui::ButtonStyle::Secondary)
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.open_manual(cx);
+                    })),
+            ));
+        }
+
         let actions = ui::actions()
             .child(
                 ui::Button::new("save-settings")

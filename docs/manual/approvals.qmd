@@ -1,0 +1,66 @@
+# Approvals and credits
+
+Mini-Me always **asks before** doing two kinds of things:
+
+1. **Running a program on your computer** (for example, a small script that makes a chart).
+2. **Spending credits** on a paid service.
+
+This keeps you in control. Nothing happens until you say yes.
+
+## "Run this on your machine?"
+
+When Mini-Me wants to run something on your computer, the conversation pauses and a box
+appears with the title **RUN THIS ON YOUR MACHINE?**. It shows exactly what will be run.
+
+![Approving a command](images/approvals-run-command.png)
+
+You can choose:
+
+| Button | What it means |
+|---|---|
+| **Approve** | Run this one thing. Ask me again next time. |
+| **Reject** | Don't run it. Mini-Me will try another way or tell you it can't continue. |
+| **Approve the rest of this turn** | Run this and anything else needed **for this question only**. |
+| **Approve everything in this conversation** | Don't ask again **in this conversation** (until you close the app). |
+
+::: {.callout-tip}
+If you don't read code, that's fine. The commands are normally analysis steps such as reading
+your file or drawing a chart. Choosing **Approve the rest of this turn** is a good balance
+between safety and not being asked too often.
+:::
+
+If you chose *Approve everything*, the bottom bar shows **approving everything — click to
+stop**. Click it to go back to being asked each time.
+
+You can turn these questions off completely in **Settings → Backend → Ask before every
+command**, but we recommend leaving it on.
+
+## AutoDiscovery and credits
+
+**AutoDiscovery** explores a dataset on its own by running many small experiments. It uses a
+paid service where **each experiment costs one credit**, so it always stops first and asks
+**Start this discovery run?**
+
+1. Read the description of what it will explore.
+2. Under **EXPERIMENTS TO RUN**, choose how many experiments you want (fewer = cheaper).
+3. Check how many **credits you have left**. If it says *"That is more than the credits
+   left"*, choose fewer experiments.
+4. Click **Run … and spend …** to start, or **Not now** to cancel.
+
+**Nothing is spent until you press the button.**
+
+When the run is finished, you can open it to see each experiment, its figures, and which
+results **changed its beliefs the most** — the most surprising findings are marked.
+
+## When an online service asks a question
+
+Sometimes one of the online services Mini-Me uses needs extra information from you. A box
+titled **MCP SERVICE NEEDS INPUT** appears. Fill it in and click **Send response** (or
+**Continue**). Click **Decline** to say no, or **Cancel tool** to stop that step altogether.
+
+## Switching AI company
+
+If you change the AI company (provider) Mini-Me uses, it asks **Switch to …?** and reminds you
+that questions will then be **billed to that company's account**. Click **Switch provider**
+to confirm, or **Cancel** to keep the current one. Nothing is billed until you save and ask a
+question.

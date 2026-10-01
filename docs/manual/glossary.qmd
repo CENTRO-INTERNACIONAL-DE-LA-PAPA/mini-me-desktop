@@ -1,0 +1,58 @@
+# Glossary
+
+[**API key**]{#api-key}
+: A long password-like code that lets Mini-Me use an AI company's service (such as OpenAI,
+  Anthropic or Google). The company charges the account the key belongs to. Treat it like a
+  password: don't share it or paste it into emails or documents. Your team lead or IT team can
+  tell you how to get one.
+
+**Asta**
+: A research service from the Allen Institute for AI. Mini-Me uses it to search scientific
+  papers, read PDFs and generate hypotheses. Some Asta features use **credits**.
+
+**Backend**
+: The part of Mini-Me that does the research work in the background. You never use it
+  directly; the app installs and runs it for you.
+
+**CIP Dataverse**
+: The International Potato Center's online catalogue of research datasets.
+
+**Conversation**
+: One chat with Mini-Me, with its own history and files.
+
+**Coordinator**
+: The part of Mini-Me that reads your question and decides which specialist should do the work.
+
+**Credits**
+: Units used to pay for some Asta services, such as AutoDiscovery. Mini-Me always asks before
+  spending them.
+
+**Hypothesis**
+: An idea or possible explanation that can be tested with data.
+
+**Mission**
+: One or two sentences describing what a project is about. Mini-Me reads it every time you ask
+  something.
+
+**Model**
+: The AI "brain" that writes the answers (for example a GPT, Claude or Gemini model).
+
+**Pinboard**
+: The panel on the right of the window that collects a conversation's results.
+
+**Project**
+: A group of conversations about the same topic, sharing one mission and one folder.
+
+**Provenance**
+: A record of how a result was made — which specialists worked on it and in what order.
+
+**Provider**
+: The AI company whose model Mini-Me uses (Anthropic, OpenAI, Google, Mistral…).
+
+**Specialist**
+: A member of Mini-Me's team that is good at one job, such as finding papers or cleaning data.
+  See [Meet the specialists](specialists.qmd).
+
+**WSL (Windows Subsystem for Linux)**
+: A feature built into Windows that lets it run Linux programs. Mini-Me's backend needs it. The
+  app installs it for you during setup.

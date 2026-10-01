@@ -1,0 +1,47 @@
+project:
+  type: book
+  output-dir: _book
+  # installing.qmd and first-time-setup.qmd are kept but left out of the book for now
+  # (Mini-Me is installed in advance for workshop users). To bring them back, delete the two
+  # "!" lines here and uncomment them under "Getting started" below.
+  render:
+    - "*.qmd"
+    - "!installing.qmd"
+    - "!first-time-setup.qmd"
+
+book:
+  title: "Mini-Me Desktop"
+  subtitle: "User Manual"
+  author: "International Potato Center (CIP)"
+  date: today
+  search: true
+  chapters:
+    - index.qmd
+    - part: "Getting started"
+      chapters:
+        # - installing.qmd
+        # - first-time-setup.qmd
+        - the-window.qmd
+    - part: "Using Mini-Me"
+      chapters:
+        - asking-questions.qmd
+        - specialists.qmd
+        - projects.qmd
+        - results.qmd
+        - approvals.qmd
+    - part: "Settings and help"
+      chapters:
+        - settings.qmd
+        - troubleshooting.qmd
+  appendices:
+    - shortcuts.qmd
+    - glossary.qmd
+
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    css: styles.css
+    toc: true
+    number-sections: false

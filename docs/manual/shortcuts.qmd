@@ -1,0 +1,30 @@
+# Keyboard shortcuts
+
+| Keys | What they do |
+|---|---|
+| **Enter** | Send your question. |
+| **`Ctrl+P`** | Open the command list. |
+| **`Ctrl+,`** | Open Settings. |
+| **Esc** | Close the window or list that is open. |
+| **`Ctrl+C`** | Copy the selected text. |
+| **`Ctrl+X`** / **`Ctrl+V`** | Cut / paste in the question box. |
+| **`Ctrl+A`** | Select everything in the question box. |
+| **`Ctrl+Shift+A`** | Select the whole conversation. |
+
+## Useful commands in the `Ctrl+P` list
+
+| Command | What it does |
+|---|---|
+| **New thread** | Start a new conversation. |
+| **Put this conversation in a project** | Move the current conversation into a project (its folder moves too). |
+| **Save the latest report as a PDF** | Turn the latest report into a PDF with references, in the conversation's folder. |
+| **Show this conversation's provenance** | See which specialists worked on this conversation. |
+| **Expand agent activity** / **Collapse agent activity** | Show or hide the step-by-step details under every answer. |
+| **Copy last answer** | Copy Mini-Me's latest answer. |
+| **Run the named specialist in the background** | Type `/` and a specialist's name at the start of your question (for example `/report_writer …`), then run this command to send it as a background job without waiting. |
+| **Restart the backend** | Fixes many "not responding" problems. |
+| **Run setup checks** | Open the Get Started window again. |
+| **Settings** | Open Settings. |
+| **User manual** | Open this manual in your browser. |
+| **About Mini-Me** | Version information, data sources and how to cite. |
+| **Quit** | Close Mini-Me. |

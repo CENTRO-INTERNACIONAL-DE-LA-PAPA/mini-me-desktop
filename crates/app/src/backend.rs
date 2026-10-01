@@ -141,6 +141,23 @@ pub(crate) fn bundled_backend_dir() -> Option<PathBuf> {
     dir.join("langgraph.json").is_file().then_some(dir)
 }
 
+/// The user manual's front page, when this build has one.
+///
+/// A packaged build carries the rendered Quarto book as `manual/` beside the executable
+/// (`scripts/package.sh`), so it opens offline and always matches the version installed. A
+/// development build has no `manual/` folder; it falls back to the book as `quarto render
+/// docs/manual` leaves it, so the command can be tried without packaging.
+pub(crate) fn manual_index() -> Option<PathBuf> {
+    let packaged = resource("MINIME_MANUAL_DIR", "manual").join("index.html");
+    if packaged.is_file() {
+        return Some(packaged);
+    }
+    let rendered = normalized(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/manual/_book/index.html"),
+    );
+    rendered.is_file().then_some(rendered)
+}
+
 /// Render a path the way WSL sees it: `C:\\Users\\x` becomes `/mnt/c/Users/x`.
 ///
 /// The overlay lives in *this* repo, which on Windows is on the Windows filesystem,

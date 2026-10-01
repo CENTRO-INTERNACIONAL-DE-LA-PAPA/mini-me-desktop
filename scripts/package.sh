@@ -12,6 +12,7 @@
 #     scripts/                    setup-wsl.sh, run from the Setup pane
 #     mini-me/                    the backend, so no GitHub account is needed —
 #                                 host execution lives in mini-me/backend/local/ (docs §303)
+#     manual/                     the user manual, rendered from docs/manual/
 #
 # `resource()` in backend.rs looks beside the executable first, which is what makes this
 # layout work without any configuration.
@@ -65,6 +66,26 @@ for dir in scripts; do
   cp -r "$ROOT/$dir" "$OUT/$dir"
   ok "$dir/"
 done
+# ------------------------------------------------------------------- the manual
+#
+# The rendered Quarto book from `docs/manual/`, shipped as `manual/` so Settings → Help and
+# `ctrl-p` → "User manual" open it offline, at the version installed. Rendered here when
+# Quarto is on PATH; otherwise whatever `quarto render docs/manual` last left in `_book/`.
+# Missing is a warning, not a failure: the app says "this build does not include the user
+# manual" rather than breaking.
+MANUAL_SRC="$ROOT/docs/manual"
+if command -v quarto >/dev/null 2>&1; then
+  say "Rendering the user manual"
+  quarto render "$MANUAL_SRC" >/dev/null
+fi
+if [ -f "$MANUAL_SRC/_book/index.html" ]; then
+  cp -r "$MANUAL_SRC/_book" "$OUT/manual"
+  ok "manual/ ($(du -sh "$OUT/manual" | cut -f1))"
+else
+  bad "no rendered manual — install Quarto or run: quarto render docs/manual"
+  bad "Continuing without it; the app will say the manual is not included."
+fi
+
 # Bytecode belongs to whichever interpreter made it, never to a bundle.
 find "$OUT" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 

@@ -1,0 +1,22 @@
+/* Image placeholders: a dashed box so a missing screenshot is easy to spot.
+   Delete the placeholder block once the real image is in. */
+.image-placeholder {
+  border: 2px dashed #f47920;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin: 1rem 0;
+  background: rgba(244, 121, 32, 0.06);
+  font-size: 0.9rem;
+}
+.image-placeholder::before {
+  content: "🖼️ IMAGE TO ADD";
+  display: block;
+  font-weight: 700;
+  color: #f47920;
+  margin-bottom: 0.25rem;
+}
+
+/* Screenshots: rounded corners. */
+main img {
+  border-radius: 8px;
+}

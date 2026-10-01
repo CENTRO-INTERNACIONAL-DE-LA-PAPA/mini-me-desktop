@@ -94,6 +94,10 @@ jobs:
           git config --global url."https://x-access-token:${BACKEND_TOKEN}@github.com/".insteadOf "https://github.com/"
           bash scripts/bundle-backend.sh
 
+      # `package.sh` renders `docs/manual/` into the bundle's `manual/` when Quarto is on PATH.
+      # HTML only, so no LaTeX/TinyTeX is needed.
+      - uses: quarto-dev/quarto-actions/setup@v2
+
       - name: Package
         shell: bash
         run: bash scripts/package.sh

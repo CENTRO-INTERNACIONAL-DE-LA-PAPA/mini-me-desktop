@@ -1,0 +1,93 @@
+# Your results
+
+Everything Mini-Me produces in a conversation is collected in the **Pinboard**, the panel on the
+right side of the window. This chapter explains each part of it.
+
+![The Pinboard](images/results-pinboard.png)
+
+## Plan
+
+For bigger questions, Mini-Me writes a short **checklist** of what it is going to do. The step
+it is working on is highlighted, finished steps fade, and steps still to come are listed
+below. The plan stays after the answer is finished, so you can see what was done.
+
+## Background Jobs
+
+Some tasks take several minutes (for example generating hypotheses or analysing a large
+dataset). These appear under **Background Jobs** while they run, so you can keep asking other
+questions in the meantime.
+
+- A job that says **waiting for your approval** or **waiting for your input** needs you —
+  click it and answer. See [Approvals and credits](approvals.qmd).
+- If a job finishes while you are in another conversation, a message tells you it
+  **finished while you were away**. Click **open it** to see the results.
+
+## Files
+
+The **Files** section shows everything saved in this conversation's folder: charts, cleaned
+data, tables, notebooks, reports and the files you attached.
+
+- **Click a file** to preview it inside Mini-Me. Charts and images open full size; use the
+  arrows to move between them.
+- Choose **open outside** to open the file in its normal program (for example Excel).
+- To see all files in Windows File Explorer, open the conversation's folder (see
+  [Where your files are saved](projects.qmd#where-your-files-are-saved)).
+
+![Previewing a chart](images/results-file-preview.png)
+
+::: {.callout-tip title="Files saved in the wrong place?"}
+Sometimes a task saves a file outside the conversation's folder. When that happens, Mini-Me
+offers a button like **Copy 2 files into this conversation** so nothing gets lost.
+:::
+
+## Sources
+
+**Sources** lists the papers and references used in the answers. Click a source to open it in
+your browser. When there are many, click **View More** to see the full list.
+
+::: {.callout-warning title="Always check references"}
+Most references come from a real search, but a few may have been written by the AI from memory.
+The Sources list tells you how many of them **"came from the model rather than from a search"**
+— check those carefully before you cite them.
+:::
+
+![The Sources list](images/results-sources.png)
+
+## Datasets
+
+When the **Dataverse Explorer** finds datasets, it lists them in its answer with their title,
+a short description and a link to their page in the CIP Dataverse. Click a link to open the
+dataset's page in your browser.
+
+To work with a dataset, ask for it — for example *"Download the second dataset and profile
+it"*. Only **public** datasets can be downloaded; for restricted ones, use the dataset's page to
+request access from CIP.
+
+## Your PDFs
+
+When you give Mini-Me PDF files, the **PDF Librarian** reads them and keeps them in this
+conversation's library. The PDFs themselves are listed under **Files**.
+
+To search inside your PDFs, just ask — for example *"Which of my PDFs discuss frost
+damage?"*. Mini-Me searches **by meaning**, so it finds relevant passages even if they don't use
+your exact words.
+
+## Reports
+
+Ask *"Write a report of what we found"* and the **Report Writer** creates a full report with
+methods, findings, limitations and references. It appears under **Files**.
+
+**To save the report as a PDF:** press **`Ctrl+P`** and choose
+**Save the latest report as a PDF**. The PDF is saved in the conversation's folder.
+
+![A report saved as PDF](images/results-report-pdf.png)
+
+## How was this made? (provenance)
+
+To see **which specialists worked on this conversation, and in what order**, press
+**`Ctrl+P`** and choose **Show this conversation's provenance**.
+
+You can view it as a **timeline** (what happened, step by step) or as a **graph** (who passed
+work to whom). Use **Save as SVG** to keep a picture of it, for example for a methods section.
+
+![The provenance view](images/results-provenance.png)

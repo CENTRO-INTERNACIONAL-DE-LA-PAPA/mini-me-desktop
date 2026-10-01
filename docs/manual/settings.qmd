@@ -1,0 +1,59 @@
+# Settings
+
+Open Settings by pressing **`Ctrl+,`** (Ctrl and comma), or press `Ctrl+P` and choose
+**Settings**.
+
+Settings has five pages: **Appearance**, **Model**, **Research**, **Backend** and **Help**. After making
+changes, click **Save**. Click **Close** to leave without saving.
+
+![The Settings window](images/settings-overview.png)
+
+## Appearance
+
+**Theme** changes the colours of the whole window (for example light or dark). Open the list
+and **point at a theme to preview it**; click it to choose it, then click **Save**.
+
+Under **GET MORE** you can browse and **install** extra themes.
+
+## Model {#model}
+
+This page controls **which AI** answers your questions, and its keys.
+
+- **Provider** — the AI company: Anthropic, OpenAI, Google, Mistral, or *Custom
+  (OpenAI-compatible)*.
+- **Model** — which of that company's models to use. Pick one from the list, or type its name
+  in the box below if it is newer than the list.
+- **Per specialist** — you can give individual specialists a different model. Leave them on
+  **Use default** unless you have a reason to change them.
+- **Keys** — one API key per company. Click the company's name, paste the key in the
+  **API key** box, and click **Save**. A tick (✓) shows which companies already have a key.
+  The box shows **· stored** when a key is saved and **· not set** when it isn't.
+- **Base URL** — only for *Custom* providers. Your IT team will give you this if you need it.
+
+![Adding an API key](images/settings-keys.png)
+
+::: {.callout-note}
+Keys are stored in **Windows Credential Manager**, never in a normal file, and are never shown
+again after you save them. Using a company's model is **billed to that company's account** —
+the one the key belongs to.
+:::
+
+## Research
+
+Here you can paste an **Asta token** and an **Asta API key** by hand. Most people don't need
+this: signing in to Asta during setup is enough.
+
+## Backend
+
+| Setting | What it does | Recommended |
+|---|---|---|
+| **Ask before every command** | Pauses and shows each program before it runs on your computer. See [Approvals](approvals.qmd). | On |
+| **Let work run in the background** | Long jobs keep going while you carry on asking questions. | Your choice |
+| **Show what ran** | Adds a line to the Pinboard listing the programs this conversation ran, and whether any of them saved files outside its folder. Useful when checking your work. | Off, unless you need it |
+| **Run setup checks** | Opens the **Get Started** window, which checks your computer and fixes problems. | — |
+| **Backend port** | A technical setting. Leave it as it is unless IT asks you to change it. | `2024` |
+
+## Help
+
+Click **Open user manual** to open this manual in your web browser. It comes with the app, so
+it works without an internet connection and always matches the version you have installed.

@@ -1,0 +1,31 @@
+# Meet the specialists
+
+Mini-Me is not one assistant but a **team**. The **Coordinator** reads your question and hands
+each part of the work to the right specialist. Each specialist has its own colour, so you can
+see at a glance who did what.
+
+You don't have to remember this list — just ask your question. It is here so you know what
+the team can do.
+
+| Specialist | What it does for you | Ask it things like… |
+|---|---|---|
+| **Research Planner** | Writes a short, step-by-step plan for your research. It only plans; it doesn't do the work, so you can review it first. | *Make a plan to study the effect of altitude on yield.* |
+| **Academic Researcher** | Searches scientific papers and summarises what they say, with references and links. | *What does the literature say about…?* |
+| **Dataverse Explorer** | Searches the CIP Dataverse for datasets and tells you which ones fit. | *Find datasets about potato trials in Kenya.* |
+| **PDF Librarian** | Reads the PDFs you give it and builds a small library you can search by meaning. | *Which of my PDFs talk about soil moisture?* |
+| **Data Cleaning** | Checks your data file for problems (missing values, typos, odd names) and makes a clean copy. Your original stays as it was. | *Clean this file and tell me what you fixed.* |
+| **Exploratory Data Analysis** | Describes your data: summaries, missing values, unusual values, and charts. | *Show me what is in this data, with charts.* |
+| **Diagnostic Analytics** | Looks into *why* something happened, using comparisons and statistics. | *Why did yield drop in 2022?* |
+| **Predictive Analytics** | Builds and compares models that predict an outcome, and tells you how reliable they are. | *Predict yield from rainfall and temperature.* |
+| **Data Voyager** | Tests one specific question against your data and returns findings and charts. | *Is there a link between planting date and yield in this file?* |
+| **Hypothesis Generator** | Suggests new ideas and explanations, based on the literature. | *Suggest hypotheses about why this variety resists frost.* |
+| **AutoDiscovery** | Explores a dataset on its own, coming up with and testing many ideas. It **asks for your approval** first because it uses credits. | *Explore this dataset and find surprising results.* |
+| **Report Writer** | Puts everything together into a complete report with methods, findings, limitations and references. | *Write a report of what we found.* |
+
+![Each specialist has its own colour](images/specialists-colours.png)
+
+::: {.callout-note}
+Some specialists (Academic Researcher, PDF Librarian, Data Voyager, Hypothesis Generator and
+AutoDiscovery) use the **Asta** service, so you need to have signed in to Asta during
+setup. The Dataverse Explorer needs the **CIP Dataverse** sign-in.
+:::
