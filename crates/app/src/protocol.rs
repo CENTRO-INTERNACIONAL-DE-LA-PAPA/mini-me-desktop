@@ -827,6 +827,16 @@ fn decode_stored_message(message: &Value) -> Option<(String, String)> {
         "ai" | "assistant" => "mini-me",
         _ => return None,
     };
+    // The summarization middleware's stand-in for the older turns it compressed: stored as a
+    // human message ("Here is a summary of the conversation to date: …"), written by nobody.
+    if message
+        .get("additional_kwargs")
+        .and_then(|extra| extra.get("lc_source"))
+        .and_then(Value::as_str)
+        == Some("summarization")
+    {
+        return None;
+    }
     // Content is a string, or a list of blocks in the newer content-block shape.
     let content = message.get("content")?;
     let text = match content {
@@ -3606,6 +3616,15 @@ impl TurnDecoder {
             return Vec::new();
         }
 
+        // **A model call the user never asked for.** When a conversation grows long, the
+        // summarization middleware asks the model to compress the history, and that call streams
+        // like any other: its "SESSION INTENT / SUMMARY / ARTIFACTS / NEXT STEPS" landed in the
+        // chat as if it were the answer. LangChain tags it, and every other middleware-internal
+        // call, in the chunk's metadata, so those are skipped here.
+        if is_internal_call(value.get(1)) {
+            return Vec::new();
+        }
+
         let agent = agent_ref(namespace, value.get(1));
         let mut events = self.decode_tool_calls(namespace, agent.as_ref(), chunk);
 
@@ -3679,6 +3698,18 @@ impl TurnDecoder {
         }
         events
     }
+}
+
+/// Whether a streamed chunk came from a middleware's own model call rather than an agent's turn.
+///
+/// `lc_source: "summarization"` is the conversation summary; `lc_internal_call` is LangChain's
+/// mark for any model call a middleware makes for itself (`internal_call_metadata()`).
+fn is_internal_call(metadata: Option<&Value>) -> bool {
+    let Some(metadata) = metadata else {
+        return false;
+    };
+    metadata.get("lc_source").and_then(Value::as_str) == Some("summarization")
+        || metadata.get("lc_internal_call").is_some()
 }
 
 /// The namespace part of a `messages` event name, or `None` for other events.
@@ -3989,6 +4020,42 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn a_conversation_summary_never_reaches_the_chat() {
+        // The summarization middleware's own model call streams like an answer would.
+        let summary = SseEvent {
+            name: "messages".into(),
+            data: json!([
+                {"type": "AIMessageChunk", "content": "SESSION INTENT: the user's primary goal"},
+                {"lc_source": "summarization", "lc_internal_call": "3f2a", "langgraph_node": "model"}
+            ])
+            .to_string(),
+        };
+        assert!(decode(&summary).is_empty());
+
+        // Any other middleware-internal call is skipped the same way.
+        let internal = SseEvent {
+            name: "messages|tools:d6c187d3".into(),
+            data: json!([
+                {"type": "AIMessageChunk", "content": "internal"},
+                {"lc_internal_call": "3f2a"}
+            ])
+            .to_string(),
+        };
+        assert!(decode(&internal).is_empty());
+
+        // An ordinary answer still comes through.
+        let answer = SseEvent {
+            name: "messages".into(),
+            data: json!([
+                {"type": "AIMessageChunk", "content": "Late blight"},
+                {"langgraph_node": "model"}
+            ])
+            .to_string(),
+        };
+        assert_eq!(tokens(&decode(&answer)), "Late blight");
+    }
+
     fn tokens(events: &[TurnEvent]) -> String {
         events
             .iter()
@@ -4274,6 +4341,14 @@ mod tests {
         // showing" rule still applies to it if it somehow did.
         assert_eq!(
             decode_stored_message(&json!({"type": "human", "content": "   "})),
+            None
+        );
+        assert_eq!(
+            decode_stored_message(&json!({
+                "type": "human",
+                "content": "Here is a summary of the conversation to date: SESSION INTENT",
+                "additional_kwargs": {"lc_source": "summarization"}
+            })),
             None
         );
     }

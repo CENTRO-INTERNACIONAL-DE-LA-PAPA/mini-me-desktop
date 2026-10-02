@@ -60,7 +60,7 @@ pub struct WslTarget {
 ///
 /// 1. **An environment override**, for anything unusual.
 /// 2. **Next to the executable** — how a *packaged* build is laid out
-///    (`mini-me-desktop.exe` beside `mini-me/`, `scripts/`, `vendor/`). Checked before
+///    (`mini-me-desktop-app.exe` beside `mini-me/` and `scripts/`). Checked before
 ///    the compiled-in path so a shipped copy never reaches back to a source tree that
 ///    exists only on the machine it was built on.
 /// 3. **The repo**, resolved at compile time, which is the development case and was the
@@ -2518,10 +2518,10 @@ mod tests {
             "release.sh must accept the layout package.sh ships, or a correct bundle is refused"
         );
 
-        // **And `vendor/` alone must not satisfy it.** `package.sh` creates an empty `vendor/`
-        // with only a README so that a pre-§283 installer still accepts the download. A check
-        // that treated the directory's existence as "the backend is here" would pass on a bundle
-        // carrying no backend at all — which is the failure §283 shipped for a fortnight.
+        // **And `vendor/` alone must not satisfy it.** `package.sh` used to create an empty
+        // `vendor/` so a pre-§283 installer would accept the download. A check that treated the
+        // directory's existence as "the backend is here" would pass on a bundle carrying no
+        // backend at all — which is the failure §283 shipped for a fortnight.
         assert!(
             !releaser.contains("[ -d \"$BUNDLE/vendor\" ]"),
             "an empty vendor/ is a compatibility shim, never evidence of a backend"
