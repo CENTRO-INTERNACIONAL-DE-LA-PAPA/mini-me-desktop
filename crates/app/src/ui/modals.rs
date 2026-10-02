@@ -50,7 +50,7 @@ impl Workbench {
             .child(services)
             .child(ui::Label::new(
                 "Mini-Me will continue with the research services that are available. For help, \
-                 contact pierp.palacios@cgiar.org.",
+                 contact piero.palacios@cgiar.org.",
             ));
 
         ui::Modal::new("mcp-unavailable", title)

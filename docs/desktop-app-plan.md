@@ -17336,7 +17336,7 @@ an availability note so it cannot claim a skipped service was consulted or fabri
 
 After graph warm-up, the desktop reads `GET /mcp-status`. Unavailable services open one dismissible
 modal saying that the MCP is not reachable at this time, that Mini-Me will continue with available
-services, and to contact `pierp.palacios@cgiar.org`. The endpoint exposes stable service ids and
+services, and to contact `piero.palacios@cgiar.org`. The endpoint exposes stable service ids and
 display names but never the upstream exception; deployment detail stays in the backend log. An old
 backend without the status route remains compatible and simply produces no notice.
 
