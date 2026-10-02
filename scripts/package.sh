@@ -68,21 +68,25 @@ for dir in scripts; do
 done
 # ------------------------------------------------------------------- the manual
 #
-# The rendered Quarto book from `docs/manual/`, shipped as `manual/` so Settings → Help and
-# `ctrl-p` → "User manual" open it offline, at the version installed. Rendered here when
-# Quarto is on PATH; otherwise whatever `quarto render docs/manual` last left in `_book/`.
+# The rendered Quarto book from `docs/manual/`, shipped as `manual/en/` and `manual/es/` so
+# Settings → Help and `ctrl-p` → "User manual" open it offline, at the version installed.
+# Rendered here, both editions, when Quarto is on PATH; otherwise whatever
+# `quarto render --profile en|es` last left in `_book/`.
 # Missing is a warning, not a failure: the app says "this build does not include the user
 # manual" rather than breaking.
 MANUAL_SRC="$ROOT/docs/manual"
 if command -v quarto >/dev/null 2>&1; then
   say "Rendering the user manual"
-  quarto render "$MANUAL_SRC" >/dev/null
+  rm -rf "$MANUAL_SRC/_book"
+  quarto render "$MANUAL_SRC" --profile en >/dev/null
+  quarto render "$MANUAL_SRC" --profile es >/dev/null
 fi
-if [ -f "$MANUAL_SRC/_book/index.html" ]; then
+if [ -f "$MANUAL_SRC/_book/en/index.html" ]; then
   cp -r "$MANUAL_SRC/_book" "$OUT/manual"
   ok "manual/ ($(du -sh "$OUT/manual" | cut -f1))"
+  [ -f "$OUT/manual/es/index.html" ] || bad "no Spanish manual — run: quarto render docs/manual --profile es"
 else
-  bad "no rendered manual — install Quarto or run: quarto render docs/manual"
+  bad "no rendered manual — install Quarto or run: quarto render docs/manual --profile en"
   bad "Continuing without it; the app will say the manual is not included."
 fi
 
@@ -131,26 +135,9 @@ else
 fi
 
 # `.git` is dropped above, so record what went in.
-# ------------------------------------------------- a folder the old app insists on
-#
-# **Kept for one reason, and it is not a good one.** `update.rs` shipped with `vendor` as a
-# *required* marker of a bundle, so an install from before v0.3.15 refuses any download
-# without one: `unpack` answers "the download does not contain a bundle", nothing is staged,
-# and the Restart to Update button never appears. There is no way to fix that remotely —
-# the check lives in the copy already on the researcher's machine.
-#
-# So every bundle carries a `vendor/`, whatever else it carries, until nobody is running a
-# build older than v0.3.15. Newer apps accept `mini-me` or `vendor` (BUNDLE_BACKENDS), which
-# is what this should have been from the start.
-mkdir -p "$OUT/vendor"
-cat > "$OUT/vendor/README.txt" <<'VENDOR'
-The backend moved to ../mini-me in v0.3.14.
-
-This folder is kept only so that installs older than v0.3.15 accept this download:
-their updater requires a folder named `vendor` beside the executable and refuses
-the bundle without one. Nothing reads what is in here.
-VENDOR
-ok "vendor/ (empty — so an older install still accepts this bundle)"
+# No `vendor/` any more. It was an empty marker so installs older than v0.3.15 would accept a
+# download, but those installs also require an `overlay/` that bundles stopped carrying in
+# v0.3.36, so they reject every bundle regardless. Newer apps look for `mini-me/`.
 
 cat > "$OUT/README.txt" <<'TXT'
 Mini-Me Desktop

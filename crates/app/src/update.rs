@@ -315,11 +315,25 @@ pub enum Fetch {
 /// Creating it is the *first* thing done, before a byte is downloaded, because "this folder is not
 /// writable" is a failure worth having in the first second rather than the sixtieth.
 pub fn staging(install: &Path, tag: &str) -> PathBuf {
-    let name = format!(".mini-me-update-{}", tag.trim_start_matches('v'));
     install
         .parent()
         .unwrap_or(install)
-        .join(name)
+        .join(staging_name(tag))
+}
+
+/// Where a download is staged when the install's *parent* cannot be written: inside the install.
+///
+/// **An install under `C:\Program Files`.** IT whitelists the app by that exact path, so it cannot
+/// move to a folder of the user's own, and a normal user cannot create anything in `Program Files`
+/// itself. The install folder is different: it is set up with the user given full control over it,
+/// so a folder inside it can be made, and the swap replaces the install's *contents* rather than
+/// the folder (see [`Swap::in_place`]). Same volume again, so every step is still a rename.
+pub fn staging_inside(install: &Path, tag: &str) -> PathBuf {
+    install.join(staging_name(tag))
+}
+
+fn staging_name(tag: &str) -> String {
+    format!(".mini-me-update-{}", tag.trim_start_matches('v'))
 }
 
 /// Is this download the thing that was published?
@@ -473,6 +487,13 @@ pub struct Swap {
     pub launch: PathBuf,
     /// Where the helper writes what it did, since by then nothing else is watching.
     pub log: PathBuf,
+    /// Replace what is *inside* [`Self::install`] instead of the folder itself.
+    ///
+    /// True when the download was staged inside the install ([`staging_inside`]), which only
+    /// happens when the install's parent is not writable. Moving the folder needs that parent, so
+    /// the swap moves the install's contents aside and the new bundle's contents in; the folder,
+    /// and the path IT whitelisted, never change. Derived in [`Swap::plan`], never passed.
+    pub in_place: bool,
     /// The working directory the helper runs in, which must be **outside** [`Self::install`].
     ///
     /// A spawned process inherits its parent's working directory, and when a researcher
@@ -505,12 +526,18 @@ impl Swap {
     pub fn plan(pid: u32, install: &Path, staged: &Path, tag: &str) -> Self {
         let parent = install.parent().unwrap_or(install).to_path_buf();
         let version = tag.trim_start_matches('v');
+        let staging = staged.parent().unwrap_or(staged).to_path_buf();
+        let in_place = staging.parent() == Some(install);
+        // In place, the old files go to a folder inside the install too: it is the only place the
+        // helper is sure to be able to write.
+        let retired_in = if in_place { install.to_path_buf() } else { parent };
         Self {
             pid,
             install: install.to_path_buf(),
             staged: staged.to_path_buf(),
-            retired: parent.join(format!(".mini-me-previous-{version}")),
-            staging: staged.parent().unwrap_or(staged).to_path_buf(),
+            retired: retired_in.join(format!(".mini-me-previous-{version}")),
+            staging,
+            in_place,
             launch: install.join(BUNDLED_EXECUTABLES[0]),
             log: std::env::temp_dir().join("mini-me-desktop-update.log"),
             // The temp folder: guaranteed to exist, guaranteed not to be the thing being moved.
@@ -559,6 +586,9 @@ const EXIT_GRACE_SECONDS: u32 = 60;
 /// and the helper died at line one having done nothing. The only reason it was ever diagnosable is
 /// that PowerShell put the error on *stderr* — the same file by a different handle (§274).
 pub fn swap_script(plan: &Swap) -> String {
+    if plan.in_place {
+        return in_place_script(plan);
+    }
     let (install, staged, retired, staging, launch) = (
         quote(&plan.install),
         quote(&plan.staged),
@@ -589,6 +619,64 @@ pub fn swap_script(plan: &Swap) -> String {
          }} catch {{ \
          Note \"could not move the new build in, putting the old one back: $_\"; \
          Move-Item -LiteralPath {retired} -Destination {install} -Force; \
+         Note 'the old build is back'; exit 1 }}; \
+         try {{ Start-Process -FilePath {launch} -WorkingDirectory {install}; Note 'relaunched' }} \
+         catch {{ Note \"the new build is in place but did not start: $_\" }}; \
+         Remove-Item -LiteralPath {retired} -Recurse -Force -ErrorAction SilentlyContinue; \
+         Remove-Item -LiteralPath {staging} -Recurse -Force -ErrorAction SilentlyContinue; \
+         Note 'done'"
+    )
+}
+
+/// The swap for an install whose parent is not writable: replace the contents, keep the folder.
+///
+/// The same safety order as [`swap_script`], one level down. Every top-level item in the install
+/// except the staging and retired folders is moved into the retired folder, then every item of the
+/// new bundle is moved into the install. A failure while moving the old files out puts back what
+/// already moved; a failure while moving the new ones in removes what arrived and puts the old
+/// ones back. Each move is a rename inside one folder, so nothing is copied.
+fn in_place_script(plan: &Swap) -> String {
+    let (install, staged, retired, staging, launch) = (
+        quote(&plan.install),
+        quote(&plan.staged),
+        quote(&plan.retired),
+        quote(&plan.staging),
+        quote(&plan.launch),
+    );
+    let pid = plan.pid;
+    let grace = EXIT_GRACE_SECONDS;
+    format!(
+        "$ErrorActionPreference = 'Stop'; \
+         function Note($m) {{ Write-Output \"$(Get-Date -Format o) $m\" }}; \
+         Note 'waiting for mini-me-desktop-app (pid {pid}) to exit'; \
+         $left = {grace}; \
+         while ($left -gt 0 -and (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ \
+         Start-Sleep -Seconds 1; $left-- }}; \
+         if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ \
+         Note 'it is still running after {grace}s, so nothing was changed'; exit 1 }}; \
+         Start-Sleep -Milliseconds 750; \
+         $skip = @((Split-Path -Leaf {retired}), (Split-Path -Leaf {staging})); \
+         function Current {{ Get-ChildItem -LiteralPath {install} -Force | \
+         Where-Object {{ $skip -notcontains $_.Name }} }}; \
+         try {{ \
+         if (Test-Path -LiteralPath {retired}) {{ Remove-Item -LiteralPath {retired} -Recurse -Force }}; \
+         New-Item -ItemType Directory -Path {retired} | Out-Null; \
+         Current | ForEach-Object {{ Move-Item -LiteralPath $_.FullName -Destination {retired} -Force }}; \
+         Note 'moved the old files aside' \
+         }} catch {{ \
+         Note \"could not move the old files aside, putting back what moved: $_\"; \
+         Get-ChildItem -LiteralPath {retired} -Force | \
+         ForEach-Object {{ Move-Item -LiteralPath $_.FullName -Destination {install} -Force }}; \
+         exit 1 }}; \
+         try {{ \
+         Get-ChildItem -LiteralPath {staged} -Force | \
+         ForEach-Object {{ Move-Item -LiteralPath $_.FullName -Destination {install} -Force }}; \
+         Note 'the new build is in place' \
+         }} catch {{ \
+         Note \"could not move the new build in, putting the old one back: $_\"; \
+         Current | ForEach-Object {{ Remove-Item -LiteralPath $_.FullName -Recurse -Force }}; \
+         Get-ChildItem -LiteralPath {retired} -Force | \
+         ForEach-Object {{ Move-Item -LiteralPath $_.FullName -Destination {install} -Force }}; \
          Note 'the old build is back'; exit 1 }}; \
          try {{ Start-Process -FilePath {launch} -WorkingDirectory {install}; Note 'relaunched' }} \
          catch {{ Note \"the new build is in place but did not start: $_\" }}; \
@@ -1219,6 +1307,27 @@ mod tests {
         )
     }
 
+    /// An install whose parent is not writable (`C:/Program Files`) stages inside itself, and its
+    /// plan replaces the contents: the old files go to a folder inside the install, never beside it.
+    #[test]
+    fn a_download_staged_inside_the_install_swaps_its_contents() {
+        let install = Path::new("C:/Program Files/mini-me-desktop");
+        let staging = staging_inside(install, "v0.3.42");
+        assert_eq!(staging, install.join(".mini-me-update-0.3.42"));
+        let plan = Swap::plan(4242, install, &staging.join("mini-me-desktop"), "v0.3.42");
+        assert!(plan.in_place);
+        assert_eq!(plan.retired, install.join(".mini-me-previous-0.3.42"));
+        assert_eq!(plan.staging, staging);
+        let script = swap_script(&plan);
+        assert!(script.contains("moved the old files aside"));
+        // The install folder itself is never moved.
+        assert!(!script.contains(&format!(
+            "Move-Item -LiteralPath {} -Destination",
+            quote(install)
+        )));
+        assert!(!a_plan().in_place, "an install with a writable parent still swaps the folder");
+    }
+
     /// The plan is derived, not passed in, so no caller can pair the folders the wrong way round —
     /// which in this script would mean deleting the app instead of replacing it.
     #[test]
@@ -1443,6 +1552,7 @@ mod tests {
             staging: PathBuf::from("__BASE__/.mini-me-update-9.9.9"),
             launch: PathBuf::from("__BASE__/mini-me-desktop/mini-me-desktop-app.exe"),
             log: PathBuf::from("__LOG__"),
+            in_place: false,
             working: PathBuf::from("__WORK__"),
         });
         let rehearsal = include_str!("../../../scripts/swap-rehearsal.ps1");

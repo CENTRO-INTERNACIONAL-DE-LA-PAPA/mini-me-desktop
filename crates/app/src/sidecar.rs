@@ -1286,16 +1286,25 @@ impl Sidecar {
     ) -> mpsc::UnboundedReceiver<crate::update::Fetch> {
         let (tx, rx) = mpsc::unbounded();
         self.runtime.spawn(async move {
-            let staged = crate::update::staging(&install, &release.tag);
+            let mut staged = crate::update::staging(&install, &release.tag);
             // A leftover from an abandoned attempt is not a reason to refuse; it is a reason to
             // start clean, since a half-unpacked bundle would pass every check a whole one does.
             let _ = std::fs::remove_dir_all(&staged);
-            if let Err(error) = std::fs::create_dir_all(&staged) {
-                let _ = tx.unbounded_send(crate::update::Fetch::Failed(format!(
-                    "could not make room beside the app at {}: {error}",
-                    staged.display()
-                )));
-                return;
+            if let Err(beside) = std::fs::create_dir_all(&staged) {
+                // An install under `C:\Program Files`: the parent is closed to the user, but the
+                // install folder itself is theirs. Stage inside it, and the swap will replace the
+                // contents rather than the folder (`Swap::in_place`).
+                let inside = crate::update::staging_inside(&install, &release.tag);
+                let _ = std::fs::remove_dir_all(&inside);
+                if let Err(error) = std::fs::create_dir_all(&inside) {
+                    let _ = tx.unbounded_send(crate::update::Fetch::Failed(format!(
+                        "could not make room for the update beside the app ({beside}) or inside it \
+                         at {}: {error}",
+                        inside.display()
+                    )));
+                    return;
+                }
+                staged = inside;
             }
 
             let client = match reqwest::Client::builder()

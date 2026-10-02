@@ -96,12 +96,8 @@ fi
 # with "the bundle cannot install itself", and the suggested fix rebuilt exactly the same
 # thing. That fallback is gone; nothing in this repository still produces `vendor/Mini-Me`.
 #
-# The empty `vendor/` directory `package.sh` still creates is a different thing — a
-# compatibility marker for installs older than v0.3.15, not a backend location — and is
-# deliberately not checked here (an empty `vendor/` is never evidence of a backend). Kept in
-# step with `BUNDLE_BACKENDS` in `update.rs`, which is the list the installed app actually
-# tests (§304): it accepts `mini-me` (a real backend) or `vendor` (that empty marker, for an
-# old installer that refuses any download without a folder by that name).
+# `package.sh` no longer writes the empty `vendor/` compatibility marker: the installs it served
+# (older than v0.3.15) also require `overlay/`, which no bundle has carried since v0.3.36.
 if [ -f "$BUNDLE/mini-me/langgraph.json" ]; then
   ok "mini-me/ (the backend, so no GitHub account is needed)"
 else
