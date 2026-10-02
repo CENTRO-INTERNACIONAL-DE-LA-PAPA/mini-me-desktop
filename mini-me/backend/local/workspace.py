@@ -629,9 +629,27 @@ class LocalWorkspaceBackend(LocalShellBackend):
 
     # -- path semantics ----------------------------------------------------------
     #
-    # Reads need no help: with `virtual_mode=False` deepagents allows absolute paths
-    # as-is and resolves relative ones under `cwd` — which is the workspace, and is
-    # exactly what upstream's `_resolve_for_read` arranged. Writes do need help.
+    # Reads need help too. deepagents' file tools run every path through `validate_path`
+    # *before* the backend sees it, and that turns `./report.pdf` into `/report.pdf` — so
+    # the "relative paths resolve under cwd" branch below is never reached from a tool.
+    # Every attachment arrives as `./<name>`, and `read_file` looked for it at the root of
+    # the Linux filesystem: "File '/report.pdf' not found" with the file sitting in the
+    # conversation's folder.
+
+    def _resolve_path(self, key: str) -> Path:
+        """Fall back to the workspace for a root-level path that only exists there.
+
+        The one funnel every file operation goes through (read, edit, ls, grep, glob,
+        download). A real absolute path that exists — `/mnt/c/...`, `/etc/os-release` —
+        is left alone; only one that is missing on the host *and* present under the
+        workspace is redirected, which is exactly the `./x` → `/x` rewrite.
+        """
+        resolved = super()._resolve_path(key)
+        if isinstance(key, str) and key.startswith("/") and not resolved.exists():
+            local = self._work_dir / key.lstrip("/")
+            if local.exists():
+                return local
+        return resolved
 
     def _reroute_write(self, path: str) -> str:
         """Send a write outside the workspace to ``<workspace>/<basename>``.
