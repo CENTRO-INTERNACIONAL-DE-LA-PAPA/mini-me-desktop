@@ -124,11 +124,17 @@ impl Workbench {
         // needs a restart" case. Left as a plain `Fail` this drew a red ✗ with an "Install
         // Ubuntu" button sitting right above a log that already explained the real state,
         // which read as the app being confused about its own result.
-        let pending_restart = check.state != preflight::State::Pass
+        let fix_succeeded = check.state != preflight::State::Pass
             && self
                 .running_fix
                 .as_ref()
                 .is_some_and(|fix| fix.check_id == check.id && fix.done && fix.ok);
+        // Every step's row sits in this state while the automatic re-check runs, but only
+        // installing WSL itself needs a reboot (see `judge_finished_fix`). Any other step that
+        // still fails once the re-check is back is an ordinary failure, with its fix offered again.
+        let rechecking = fix_succeeded && self.checking;
+        let restart_needed = fix_succeeded && !self.checking && check.id == "runtime" && cfg!(windows);
+        let pending_restart = rechecking || restart_needed;
         let color = if pending_restart {
             theme::warning()
         } else {
@@ -217,7 +223,9 @@ impl Workbench {
                     // `check.detail` still reads "isn't responding" here — true of the probe,
                     // but read by a person as "it didn't install," which is the opposite of
                     // what happened. Restate it as the plain fact: installed, restart pending.
-                    .child(if pending_restart {
+                    .child(if rechecking {
+                        "Done — checking it again…".to_string()
+                    } else if restart_needed {
                         "Installed — restart your computer, then reopen Mini-Me for this to \
                          turn green."
                             .to_string()
@@ -392,17 +400,52 @@ impl Workbench {
             );
         if let Some((_, composer)) = self.fields.iter().find(|(field, _)| *field == Field::ApiKey)
         {
+            let testing = matches!(self.key_test, Some(KeyTest::Running));
+            entry = entry.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex_grow()
+                            .min_w_0()
+                            .p_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(theme::border()))
+                            .track_focus(&composer.focus_handle(cx))
+                            .in_focus(|style| style.border_color(rgb(theme::accent())))
+                            .child(composer.clone()),
+                    )
+                    .child(
+                        div().flex_none().child(
+                            ui::Button::new("onboarding-test-key")
+                                .text(if testing { "Testing…" } else { "Test key" })
+                                .disabled(testing)
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    workbench.test_onboarding_key(cx);
+                                })),
+                        ),
+                    ),
+            );
+        }
+        if let Some(result) = &self.key_test {
+            let (text, colour) = match result {
+                KeyTest::Running => ("asking the provider…".to_string(), theme::text_muted()),
+                KeyTest::Passed(message) => (format!("✓ {message}"), theme::text()),
+                KeyTest::Failed(message) => (format!("✗ {message}"), theme::error()),
+            };
             entry = entry.child(
                 div()
                     .w_full()
                     .min_w_0()
-                    .p_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .track_focus(&composer.focus_handle(cx))
-                    .in_focus(|style| style.border_color(rgb(theme::accent())))
-                    .child(composer.clone()),
+                    .text_color(rgb(colour))
+                    .text_xs()
+                    .child(text),
             );
         }
         let skipped = self.onboarding_skipped.contains(&check_id);

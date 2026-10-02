@@ -784,6 +784,23 @@ impl Sidecar {
         rx
     }
 
+    /// Ask a provider whether an API key is accepted. The key is read on the main thread by the
+    /// caller, like every other secret.
+    pub fn test_key(
+        &self,
+        provider: String,
+        base_url: String,
+        api_key: String,
+    ) -> mpsc::UnboundedReceiver<Result<String, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let client = reqwest::Client::new();
+            let result = crate::catalogue::test_key(&client, &provider, &base_url, &api_key).await;
+            let _ = tx.unbounded_send(result);
+        });
+        rx
+    }
+
     /// Install one theme extension into the researcher's `themes/` directory.
     pub fn install_theme(
         &self,

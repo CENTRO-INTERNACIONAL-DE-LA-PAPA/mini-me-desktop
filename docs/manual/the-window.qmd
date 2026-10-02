@@ -21,7 +21,9 @@ dragging its edge.
 
 This is the main area.
 
-- At the **bottom** is the box where you type your question.
+- At the **bottom** is the box where you type your question. Inside it, next to the send button,
+  is the name of the specialist your next question goes to (**Coordinator** unless you choose
+  one).
 - Above it, Mini-Me's answers appear as they are written, like a chat.
 - Each answer shows **which specialist** did the work and how many **steps** it took. Click the
   steps to see what happened.

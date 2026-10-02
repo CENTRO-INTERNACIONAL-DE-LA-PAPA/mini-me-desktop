@@ -1579,10 +1579,6 @@ impl Workbench {
         let column = column
             .children(self.collected_banner(cx))
             .children(self.attachment_chips(cx))
-            // The indicator anchors to *this* box, not the transcript's — `collected_banner`
-            // and `attachment_chips` above are both optional, so anything anchored further up
-            // the tree would land a different distance from the composer depending on which of
-            // them happened to be showing (§263).
             .child(self.composer_input(cx));
 
         // The actual middle panel

@@ -3,8 +3,12 @@
 Open Settings by pressing **`Ctrl+,`** (Ctrl and comma), or press `Ctrl+P` and choose
 **Settings**.
 
-Settings has five pages: **Appearance**, **Model**, **Research**, **Backend** and **Help**. After making
-changes, click **Save**. Click **Close** to leave without saving.
+Settings has five pages, listed on the left: **Appearance**, **Model**, **Research**,
+**Backend** and **Help**. Click a page to open it. To find a setting quickly, type in the
+**Search** box above the list — for example *key* shows **Model**, and *port* shows **Backend**.
+
+After making changes, click **Save** at the bottom left. It saves the changes on every page at
+once. Click **Close** to leave without saving.
 
 ![The Settings window](images/settings-overview.png)
 
@@ -27,7 +31,9 @@ This page controls **which AI** answers your questions, and its keys.
   **Use default** unless you have a reason to change them.
 - **Keys** — one API key per company. Click the company's name, paste the key in the
   **API key** box, and click **Save**. A tick (✓) shows which companies already have a key.
-  The box shows **· stored** when a key is saved and **· not set** when it isn't.
+  The box shows **· stored** when a key is saved and **· not set** when it isn't. When a key
+  is already saved, the empty **API key** box shows a row of asterisks (`********`). Pasting a
+  new key and clicking **Save** replaces it.
 - **Base URL** — only for *Custom* providers. Your IT team will give you this if you need it.
 
 ![Adding an API key](images/settings-keys.png)
@@ -54,6 +60,9 @@ this: signing in to Asta during setup is enough.
 | **Backend port** | A technical setting. Leave it as it is unless IT asks you to change it. | `2024` |
 
 ## Help
+
+**Version** shows which version of Mini-Me you have, for example
+*Mini-Me Desktop 0.3.40 (1c2e866)*. Include it when you report a problem.
 
 Click **Open user manual** to open this manual in your web browser. It comes with the app, so
 it works without an internet connection and always matches the version you have installed.

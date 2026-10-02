@@ -1014,6 +1014,11 @@ impl Workbench {
 
         if section == Section::Help {
             pane = pane.child(ui::setting_row(
+                "Version",
+                "Include this when reporting a problem.",
+                ui::Label::new(build_stamp()).muted(),
+            ));
+            pane = pane.child(ui::setting_row(
                 "User manual",
                 "Step-by-step help for everything in Mini-Me. Opens in your browser.",
                 ui::Button::new("open-manual")

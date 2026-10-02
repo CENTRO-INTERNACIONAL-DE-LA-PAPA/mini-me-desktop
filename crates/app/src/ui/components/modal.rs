@@ -39,6 +39,13 @@ pub struct Modal {
     id: SharedString,
     title: SharedString,
     width: f32,
+    /// A fixed height, so the card keeps one size whichever page is showing. `None` sizes it to
+    /// its content, up to 720px.
+    height: Option<f32>,
+    /// The two-panel look from the Figma "Settings Modal": the rail sits on the card's own
+    /// `background()` with no title row or divider, and the page sits in its own bordered
+    /// `surface()` panel beside it. The rail supplies its own heading.
+    framed: bool,
     nav: Option<gpui::AnyElement>,
     /// Somewhere for the keyboard to live on a page with no field of its own.
     ///
@@ -62,6 +69,16 @@ impl Modal {
 
     pub fn width(mut self, width: f32) -> Self {
         self.width = width;
+        self
+    }
+
+    pub fn framed(mut self) -> Self {
+        self.framed = true;
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.height = Some(height);
         self
     }
 
@@ -99,6 +116,10 @@ impl Modal {
 
 impl RenderOnce for Modal {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        if self.framed {
+            let id = self.id.clone();
+            return backdrop(&id, self.framed_card().into_any_element()).into_any_element();
+        }
         let scrolling = div()
             .id(SharedString::from(format!("{}-body", self.id)))
             .flex()
@@ -118,6 +139,10 @@ impl RenderOnce for Modal {
             .flex_col()
             .w(gpui::px(self.width))
             .max_h(gpui::px(720.))
+            // Fixed, but never taller than a small window: the body scrolls instead.
+            .when_some(self.height, |card, height| {
+                card.h(gpui::px(height)).max_h(gpui::relative(0.9))
+            })
             .min_h_0()
             .rounded_lg()
             .overflow_hidden()
@@ -157,27 +182,107 @@ impl RenderOnce for Modal {
             card = card.child(div().flex_none().px_4().pb_3().child(pinned));
         }
 
-        // Dimmed, so the conversation stays visible behind it and clicking away is the
-        // obvious exit.
-        div()
-            .id(SharedString::from(format!("{}-backdrop", self.id)))
-            .absolute()
-            .inset_0()
-            // **Visible behind it, not reachable behind it.** GPUI hit-tests every element whose
-            // bounds contain the pointer, so an overlay that only *paints* over the workbench
-            // leaves it live: a click on Settings also pressed whatever sat under that spot.
-            // `occlude` blocks the mouse from everything behind this hitbox. Here rather than in
-            // each caller, because every modal in the app is built from this one type and the
-            // three that existed all had the defect (docs §163).
-            .occlude()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(if theme::is_light(&theme::current()) {
-                gpui::rgba(0x33333366)
-            } else {
-                gpui::rgba(0x00000099)
-            })
-            .child(card)
+        backdrop(&self.id, card.into_any_element()).into_any_element()
     }
+}
+
+impl Modal {
+    /// The card for [`Modal::framed`]: rail left on `background()`, page right in a `surface()`
+    /// panel, with the actions and footer pinned at the bottom of that panel.
+    fn framed_card(self) -> Div {
+        let scrolling = div()
+            .id(SharedString::from(format!("{}-body", self.id)))
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_h_0()
+            .min_w_0()
+            .overflow_y_scroll()
+            // The same padding as every other modal's body.
+            .p_4()
+            .gap_3()
+            .children(self.body);
+
+        let mut page = div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_w_0()
+            .min_h_0()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(rgb(theme::surface()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .child(scrolling);
+        // The actions belong to the whole window, not the page showing, so with a rail they sit
+        // at the foot of it. Without one they stay at the foot of the page.
+        let (rail_actions, page_actions) = if self.nav.is_some() {
+            (self.actions, None)
+        } else {
+            (None, self.actions)
+        };
+        for pinned in [page_actions, self.footer].into_iter().flatten() {
+            page = page.child(div().flex_none().px_4().pb_3().child(pinned));
+        }
+
+        div()
+            .when_some(self.focus, |card, handle| card.track_focus(&handle))
+            .flex()
+            .flex_row()
+            .gap_2p5()
+            .w(gpui::px(self.width))
+            .max_h(gpui::px(720.))
+            .when_some(self.height, |card, height| {
+                card.h(gpui::px(height)).max_h(gpui::relative(0.9))
+            })
+            .min_h_0()
+            .p_3()
+            .rounded_xl()
+            .overflow_hidden()
+            .bg(rgb(theme::background()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .children(self.nav.map(|nav| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .justify_between()
+                    .w(gpui::px(NAV_WIDTH))
+                    .min_h_0()
+                    // No padding of its own: the card's `p_3` is the only inset, so the rail
+                    // lines up with the panel's top edge instead of sitting further in.
+                    .child(div().flex_grow().min_h_0().child(nav))
+                    .children(rail_actions.map(|actions| div().flex_none().pt_3().child(actions)))
+            }))
+            .child(page)
+    }
+}
+
+/// The framed rail's width: enough for the search box and the longest page name with its icon.
+const NAV_WIDTH: f32 = 190.;
+
+/// Dimmed, so the conversation stays visible behind it and clicking away is the obvious exit.
+fn backdrop(id: &SharedString, card: gpui::AnyElement) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("{}-backdrop", id)))
+        .absolute()
+        .inset_0()
+        // **Visible behind it, not reachable behind it.** GPUI hit-tests every element whose
+        // bounds contain the pointer, so an overlay that only *paints* over the workbench
+        // leaves it live: a click on Settings also pressed whatever sat under that spot.
+        // `occlude` blocks the mouse from everything behind this hitbox. Here rather than in
+        // each caller, because every modal in the app is built from this one type and the
+        // three that existed all had the defect (docs §163).
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(if theme::is_light(&theme::current()) {
+            gpui::rgba(0x33333366)
+        } else {
+            gpui::rgba(0x00000099)
+        })
+        .child(card)
 }

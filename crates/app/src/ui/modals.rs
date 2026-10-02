@@ -210,6 +210,8 @@ impl Workbench {
                             .on_click(cx.listener(move |workbench, _event, _window, cx| {
                                 workbench.confirming_provider = None;
                                 workbench.draft.provider = spec.id.to_string();
+                                // Another provider's key, stored or not.
+                                workbench.refresh_key_placeholder(cx);
                                 // A different provider has a different catalogue, and the one on
                                 // screen a moment ago belonged to the provider being left.
                                 workbench.refresh_models(cx);

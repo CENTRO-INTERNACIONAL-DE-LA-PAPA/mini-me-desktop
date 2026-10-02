@@ -202,9 +202,89 @@ pub fn models_for(provider: &crate::settings::Provider, catalogue: &Catalogue) -
     }
 }
 
+/// Where to ask a provider whether a key is good.
+///
+/// **Not `endpoint`.** OpenRouter's `/models` answers anybody, so a model list arriving proves
+/// nothing about the key — a machine with a revoked key refreshed 464 models and then failed
+/// every turn with `401 User not found`. OpenRouter's `/key` is the endpoint that checks it.
+/// Other OpenAI-compatible gateways get `/models` with the key, which the ones that need a key
+/// refuse when it is wrong.
+pub fn key_check_url(provider: &str, base_url: &str) -> Option<String> {
+    match provider {
+        "openai" => Some("https://api.openai.com/v1/models".into()),
+        "mistral" => Some("https://api.mistral.ai/v1/models".into()),
+        "anthropic" => Some("https://api.anthropic.com/v1/models".into()),
+        "google" => Some("https://generativelanguage.googleapis.com/v1beta/models".into()),
+        "custom" => {
+            let base = base_url.trim().trim_end_matches('/');
+            if base.is_empty() {
+                None
+            } else if base.contains("openrouter.ai") {
+                Some(format!("{base}/key"))
+            } else {
+                Some(format!("{base}/models"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Ask the provider whether `key` is accepted. One `GET`, no prompt, nothing billed.
+///
+/// `Ok` carries what to tell the researcher; `Err` says why it failed, in their words.
+pub async fn test_key(
+    client: &reqwest::Client,
+    provider: &str,
+    base_url: &str,
+    key: &str,
+) -> std::result::Result<String, String> {
+    let Some(url) = key_check_url(provider, base_url) else {
+        return Err(if provider == "custom" {
+            "set the endpoint URL in Settings first".into()
+        } else {
+            "this provider can't be tested from here".into()
+        });
+    };
+    let request = match provider {
+        "anthropic" => client
+            .get(&url)
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01"),
+        "google" => client.get(&url).header("x-goog-api-key", key),
+        _ => client.get(&url).bearer_auth(key),
+    };
+    let response = request
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|_| format!("could not reach {url} — check the internet connection"))?;
+    let status = response.status();
+    if status.is_success() {
+        Ok("the key works".into())
+    } else if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        Err("the provider rejected this key — check it was copied in full, or create a new one".into())
+    } else {
+        Err(format!("the provider answered {status}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openrouter_keys_are_checked_where_a_bad_key_is_refused() {
+        // `/models` answers without a key, so it can't tell a good key from a revoked one.
+        assert_eq!(
+            key_check_url("custom", "https://openrouter.ai/api/v1/").as_deref(),
+            Some("https://openrouter.ai/api/v1/key")
+        );
+        assert_eq!(
+            key_check_url("custom", "https://api.groq.com/openai/v1").as_deref(),
+            Some("https://api.groq.com/openai/v1/models")
+        );
+        assert_eq!(key_check_url("custom", "  "), None);
+    }
 
     #[test]
     fn reads_the_shape_every_openai_compatible_gateway_returns() {

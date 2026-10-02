@@ -91,6 +91,9 @@ impl Workbench {
                     })),
             )
             .child(self.composer.clone())
+            // Inside the bar, beside Send, rather than a tab on the bar's top edge: up there it
+            // covered the last line of the transcript and any attachment chips.
+            .children(self.agent_menu(cx))
             .child(
                 ui::Button::new("send-turn")
                     .icon(ui::Icon::new(send_icon))
@@ -113,22 +116,14 @@ impl Workbench {
             )
     }
 
-    /// The composer row and the agent indicator above it, sharing one `.relative()` box.
-    ///
-    /// The indicator used to anchor to the transcript's own scroll box, several elements higher
-    /// up the tree — right when nothing else stood between them, and wrong the moment
-    /// `collected_banner` or `attachment_chips` rendered, since neither shifts where the
-    /// transcript box's own bottom edge is. Anchored to *this* box instead, the indicator sits
-    /// against the composer's own top edge no matter what else is showing above it (§263).
+    /// The composer row, with the agent indicator inside it beside Send.
     pub(crate) fn composer_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .relative()
             .flex()
             .flex_col()
             .flex_none()
             .w_full()
             .min_w_0()
-            .children(self.agent_menu(cx))
             .child(self.composer_row(cx))
     }
 }
@@ -139,50 +134,62 @@ impl Workbench {
 /// Built on [`ui::menu_card`] — the chrome-only lower half [`ui::Menu`] is itself built from —
 /// rather than on `Menu` directly, because this needs the opposite of both things `Menu` bakes
 /// in: open while the pointer is over the indicator rather than opened by a click, and pivoted
-/// from its own *bottom-left* corner rather than its top-left, so it grows upward from wherever
-/// it sits instead of downward past the composer underneath it. Kept private to this file, since
+/// from its own *bottom-right* corner rather than its top-left, so it grows upward and leftward
+/// from the indicator — above the composer, on its right — instead of down past it. Kept private to this file, since
 /// no other caller in the app wants either change — `Menu`'s own callers all want the shape it
 /// already has.
 #[derive(IntoElement)]
 struct AgentMenu {
     items: Vec<gpui::AnyElement>,
+    on_hover: Option<Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
 }
 
 impl AgentMenu {
     fn new() -> Self {
-        Self { items: Vec::new() }
+        Self { items: Vec::new(), on_hover: None }
     }
 
     fn item(mut self, item: impl IntoElement) -> Self {
         self.items.push(item.into_any_element());
         self
     }
+
+    /// Whether the pointer is anywhere over the card — its padding and border included, not
+    /// only the list inside. Tracked on the list alone, the strip of card between the pill and
+    /// the first row counted as "left the menu", and it closed on the way up.
+    fn on_hover(mut self, handler: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
+        self.on_hover = Some(Box::new(handler));
+        self
+    }
 }
 
 impl RenderOnce for AgentMenu {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let mut card = ui::menu_card();
+        let mut card = ui::menu_card().id("agent-menu-card");
         for item in self.items {
             card = card.child(item);
         }
-        gpui::deferred(
+        if let Some(handler) = self.on_hover {
+            card = card.on_hover(move |hovering, window, cx| handler(hovering, window, cx));
+        }
+        // A zero-size box pinned to the indicator's top-right corner gives the popup a point to
+        // pivot on without knowing the indicator's width.
+        div().absolute().top_0().right_0().child(gpui::deferred(
             gpui::anchored()
-                // Relative to the nearest positioned ancestor — the indicator's own wrapper —
-                // rather than the window, so no click position or other measurement is needed
-                // to place it: it is always "right above wherever the indicator sits."
                 .position_mode(gpui::AnchoredPositionMode::Local)
-                // The point below becomes this corner of the popup rather than `Menu`'s default
-                // top-left, so the popup's own bottom edge sits at the indicator's top edge and
-                // it grows upward from there as rows are added, rather than downward from it.
-                .anchor(gpui::Corner::BottomLeft)
-                .position(gpui::point(px(0.), px(0.)))
+                // The popup's bottom-right corner sits on the indicator's top-right one, so it
+                // grows upward from there as rows are added. Overlapping by a couple of pixels,
+                // not spaced: the menu stays open only while the pointer is over one or the
+                // other, and even a rounding gap would close it on the way across.
+                .anchor(gpui::Corner::BottomRight)
+                .position(gpui::point(px(0.), px(2.)))
                 .child(card),
-        )
+        ))
     }
 }
 
 impl Workbench {
-    /// The pill above the composer naming who a turn will go to, and — while the pointer is
+    /// The pill beside Send naming who a turn will go to, and — while the pointer is
     /// over it or the menu it opens — every specialist available to switch to instead.
     ///
     /// Replaces typing `/name` into an inline picker (§55) with hovering a name (§263). The
@@ -211,16 +218,14 @@ impl Workbench {
                 .items_center()
                 .gap_2()
                 .flex_none()
-                .px_3()
-                .py_1()
-                .left_2()
-                .rounded_md()
-                .rounded_b_none()
+                // Figma "Subagent Selector" (Chatbox › Submit): an outlined `surface()` pill.
+                .px_2()
+                .py_0p5()
+                .rounded_full()
                 .bg(rgb(theme::surface()))
                 .border_1()
-                .border_b_0()
                 .border_color(rgb(theme::border()))
-                .hover(|style| style.cursor_pointer())
+                .hover(|style| style.bg(rgb(theme::background())).cursor_pointer())
                 .child(
                     ui::Icon::new("icons/agent-ellipse.svg")
                         .size(ui::IconSize::ExtraSmall)
@@ -233,7 +238,7 @@ impl Workbench {
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(rgb(theme::text_muted()))
                         .child(current_display
                             .as_ref()
@@ -246,13 +251,8 @@ impl Workbench {
                 })),
         );
 
-        // Pinned to `composer_input`'s own top edge — its bottom-left corner, not its own
-        // top-left, is the point given below (`Corner::BottomLeft`), so it grows upward from
-        // there as the trigger's height changes rather than needing that height known in
-        // advance. Never pushes the composer down either way: `Anchored` is itself out of flow,
-        // and the trigger inside is its only sized content.
         if !open {
-            return Some(anchor_above_composer(indicator).into_any_element());
+            return Some(indicator.into_any_element());
         }
 
         let mut list = div()
@@ -266,10 +266,6 @@ impl Workbench {
             // Tracked the same way `theme_list`/`model_list` track theirs, or a list taller
             // than `max_h` hit-tests rows against their pre-scroll layout.
             .track_scroll(&self.agent_menu_scroll)
-            .on_hover(cx.listener(|workbench, hovering: &bool, _window, cx| {
-                workbench.agent_menu_hovered = *hovering;
-                cx.notify();
-            }))
             .child(
                 // Back to the coordinator — the only way to undo a choice now that picking
                 // one no longer leaves anything in the composer to delete.
@@ -374,20 +370,13 @@ impl Workbench {
             );
         }
 
-        indicator = indicator.child(AgentMenu::new().item(list));
+        indicator = indicator.child(AgentMenu::new().item(list).on_hover(cx.listener(
+            |workbench, hovering: &bool, _window, cx| {
+                workbench.agent_menu_hovered = *hovering;
+                cx.notify();
+            },
+        )));
 
-        Some(anchor_above_composer(indicator).into_any_element())
+        Some(indicator.into_any_element())
     }
-}
-
-/// Positions an element's bottom-left corner at the composer's own visible top edge,
-/// `TRANSCRIPT_INSET` in from the left, regardless of the element's own height. Shared by both
-/// the closed (trigger only) and open (trigger plus menu) shapes `agent_menu` returns, since both
-/// anchor the same way.
-fn anchor_above_composer(child: impl IntoElement) -> impl IntoElement {
-    gpui::anchored()
-        .position_mode(gpui::AnchoredPositionMode::Local)
-        .anchor(gpui::Corner::BottomLeft)
-        .position(gpui::point(px(TRANSCRIPT_INSET), px(0.)))
-        .child(child)
 }

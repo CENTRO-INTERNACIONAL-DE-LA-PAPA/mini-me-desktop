@@ -89,9 +89,9 @@ put it in the question box, then press **Enter** to run it (or edit it first).
 Usually you don't need to: the **Coordinator** "chooses the best specialist for each turn".
 But if you know exactly who you want — for example, the **Report Writer** — you can pick them:
 
-1. Point at the name shown just **above the question box** (it says **Coordinator** by
-   default).
-2. A list of specialists appears. Click the one you want.
+1. Point at the rounded label **inside the question box, just left of the send button**
+   (it says **Coordinator** by default).
+2. A list of specialists appears above the question box, on the right. Click the one you want.
 3. Your next question goes straight to that specialist.
 
 ![Choosing a specialist](images/chat-pick-specialist.png)

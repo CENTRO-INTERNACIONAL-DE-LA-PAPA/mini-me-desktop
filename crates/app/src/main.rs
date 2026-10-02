@@ -73,7 +73,7 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 /// this is only the researcher-facing name requested in §154, so it cannot become a second
 /// project registry or collide with a real folder of the same name.
 const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
-const ICON_PATHS: [&str; 34] = [
+const ICON_PATHS: [&str; 38] = [
     "icons/settings.svg",
     "icons/conversations.svg",
     "icons/research.svg",
@@ -108,6 +108,10 @@ const ICON_PATHS: [&str; 34] = [
     "icons/sidebar-simple-right.svg",
     "icons/stop-circle.svg",
     "icons/lightbulb.svg",
+    "icons/paint-brush-household.svg",
+    "icons/brain.svg",
+    "icons/flask.svg",
+    "icons/circuitry.svg",
 ];
 
 /// The four small UI icons, compiled into the executable rather than read beside it.
@@ -156,6 +160,12 @@ impl AssetSource for Assets {
             "icons/folder.svg" => Some(include_bytes!("../assets/icons/folder.svg")),
             "icons/stop-circle.svg" => Some(include_bytes!("../assets/icons/stop-circle.svg")),
             "icons/lightbulb.svg" => Some(include_bytes!("../assets/icons/lightbulb.svg")),
+            "icons/paint-brush-household.svg" => {
+                Some(include_bytes!("../assets/icons/paint-brush-household.svg"))
+            }
+            "icons/brain.svg" => Some(include_bytes!("../assets/icons/brain.svg")),
+            "icons/flask.svg" => Some(include_bytes!("../assets/icons/flask.svg")),
+            "icons/circuitry.svg" => Some(include_bytes!("../assets/icons/circuitry.svg")),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -262,6 +272,18 @@ fn named_files(text: &str) -> Vec<String> {
 ///
 /// The `New` variant is the same idea aimed the other way: one button whose menu says what the
 /// two kinds of new thing are, rather than a button that silently means only one of them.
+/// What the API key field shows when a key is already stored. A fixed length, so it says
+/// nothing about the real key's.
+const STORED_KEY_PLACEHOLDER: &str = "********************";
+
+/// Where a "Test key" press has got to.
+#[derive(Clone, Debug)]
+enum KeyTest {
+    Running,
+    Passed(String),
+    Failed(String),
+}
+
 #[derive(Clone, Debug)]
 enum SidebarMenu {
     New,
@@ -1102,6 +1124,37 @@ impl Section {
             Section::Backend => "Backend",
             Section::Help => "Help",
         }
+    }
+
+    /// The rail icon, from the Figma "Settings Modal".
+    fn icon(self) -> &'static str {
+        match self {
+            Section::Appearance => "icons/paint-brush-household.svg",
+            Section::Model => "icons/brain.svg",
+            Section::Research => "icons/flask.svg",
+            Section::Backend => "icons/circuitry.svg",
+            Section::Help => "icons/book-open-text.svg",
+        }
+    }
+
+    /// What the rail's search matches besides the label: the settings on that page, so
+    /// "key" finds Model and "port" finds Backend.
+    fn keywords(self) -> &'static str {
+        match self {
+            Section::Appearance => "theme palette colour color dark light",
+            Section::Model => "provider model api key openrouter openai anthropic google mistral \
+                               endpoint url specialist",
+            Section::Research => "asta token dataverse sources literature",
+            Section::Backend => "port wsl ubuntu setup checks host execution approval",
+            Section::Help => "manual version about help",
+        }
+    }
+
+    fn matches(self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || self.label().to_lowercase().contains(&query)
+            || self.keywords().contains(&query)
     }
 
     fn id(self) -> &'static str {
@@ -2290,6 +2343,8 @@ struct Workbench {
     /// One-line verdicts for steps that already ran and are no longer the active row, so
     /// their box can collapse instead of keeping every finished step's full log on screen.
     onboarding_history: Vec<OnboardingStepResult>,
+    /// The Get Started key step's "Test key" result: `None` until pressed.
+    key_test: Option<KeyTest>,
     /// Steps the user chose to skip for this session: the auto-run walks past them. Skipping
     /// a required one never counts as finishing onboarding, so it comes back next launch.
     onboarding_skipped: Vec<&'static str>,
@@ -2489,6 +2544,8 @@ struct Workbench {
     shapes: std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, workspace::Shape)>>,
     /// What the sidebar's search box holds. Empty means "show everything".
     conversation_query: Entity<Composer>,
+    /// The Settings rail's search, which narrows the list of pages.
+    settings_query: Entity<Composer>,
     /// A file being previewed in the centre, if any — and the set it can be stepped through.
     preview: Option<Preview>,
     /// The researcher's past conversations, newest first.
@@ -2689,6 +2746,9 @@ impl Workbench {
         let conversation_query = cx.new(|cx| Composer::new(cx, "Search"));
         cx.observe(&conversation_query, |_workbench, _query, cx| cx.notify())
             .detach();
+        let settings_query = cx.new(|cx| Composer::new(cx, "Search"));
+        cx.observe(&settings_query, |_workbench, _query, cx| cx.notify())
+            .detach();
 
         // Renaming a conversation. Submit commits the new name; the sidebar row is
         // replaced by this field while it is in force.
@@ -2824,6 +2884,7 @@ impl Workbench {
             onboarding_step: None,
             onboarding_awaiting_manual: None,
             onboarding_history: Vec::new(),
+            key_test: None,
             onboarding_skipped: Vec::new(),
             onboarding_focus: cx.focus_handle(),
             pending_approval: None,
@@ -2871,6 +2932,7 @@ impl Workbench {
             road_open: stored.road_open,
             shapes: std::cell::RefCell::new(HashMap::new()),
             conversation_query,
+            settings_query,
             preview: None,
             conversations: Vec::new(),
             conversations_loaded: false,
@@ -2924,6 +2986,7 @@ impl Workbench {
             };
             composer.update(cx, |composer, cx| composer.set_text(value, cx));
         }
+        workbench.refresh_key_placeholder(cx);
         let has_key = settings::secret(&draft.key_name()).is_some();
         // Only nudge into plain Settings once onboarding is behind them. On a first run the
         // model-key check is one of the onboarding steps, and opening Settings underneath
@@ -3498,6 +3561,7 @@ impl Workbench {
         {
             composer.update(cx, |composer, cx| composer.set_text("", cx));
         }
+        self.refresh_key_placeholder(cx);
         // The sidecar carries the key with the model choice, so it has to hear about it now
         // rather than on the next Settings save.
         self.sidecar.set_model(model_choice(&stored));
@@ -3507,6 +3571,62 @@ impl Workbench {
         } else {
             self.run_preflight(cx);
         }
+    }
+
+    /// Show the API key field's placeholder as asterisks when the chosen provider already has a
+    /// key in the keychain, so an empty field reads as "stored" rather than "missing". The key
+    /// itself is never read back into the field.
+    ///
+    /// Called wherever the answer can change: launch, opening Settings, saving a key, and
+    /// switching provider. Not from `render`, which can't touch the composer and would read the
+    /// keychain on every frame.
+    fn refresh_key_placeholder(&self, cx: &mut Context<Self>) {
+        let stored = settings::secret(&self.draft.key_name()).is_some();
+        let placeholder = if stored {
+            STORED_KEY_PLACEHOLDER
+        } else {
+            Field::ApiKey.placeholder()
+        };
+        if let Some((_, composer)) = self.fields.iter().find(|(field, _)| *field == Field::ApiKey)
+        {
+            composer.update(cx, |composer, cx| composer.set_placeholder(placeholder, cx));
+        }
+    }
+
+    /// Ask the provider whether the key works: the one in the field if something is typed there,
+    /// otherwise the one already in the keychain. Nothing is saved.
+    fn test_onboarding_key(&mut self, cx: &mut Context<Self>) {
+        let typed = self.field_text(Field::ApiKey, cx);
+        // Read here, on the main thread — the keychain is not safe to touch from a Tokio worker.
+        let key = if typed.is_empty() {
+            settings::secret(&format!("llm:{}", self.draft.provider))
+        } else {
+            Some(typed)
+        };
+        let Some(key) = key else {
+            self.key_test = Some(KeyTest::Failed("paste your API key first".into()));
+            cx.notify();
+            return;
+        };
+        self.key_test = Some(KeyTest::Running);
+        let mut done = self.sidecar.test_key(
+            self.draft.provider.clone(),
+            self.draft.base_url.clone(),
+            key,
+        );
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = done.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    workbench.key_test = Some(match outcome {
+                        Ok(message) => KeyTest::Passed(message),
+                        Err(message) => KeyTest::Failed(message),
+                    });
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Bound to the modal's "Get Started" button: begin auto-running every pending check's
@@ -6964,6 +7084,10 @@ impl Workbench {
         for ((_, composer), (_, value)) in self.fields.iter().zip(values) {
             composer.update(cx, |composer, cx| composer.set_text(value, cx));
         }
+        self.refresh_key_placeholder(cx);
+        // A search left over from last time would hide pages without saying why.
+        self.settings_query
+            .update(cx, |query, cx| query.set_text("", cx));
         self.settings_open = true;
         if let Some(window) = window {
             self.focus_settings_page(window, cx);
@@ -7032,6 +7156,7 @@ impl Workbench {
 
         // Clear the secret fields once written — nothing is gained by leaving a key on
         // screen, and the row now reports it as stored.
+        self.refresh_key_placeholder(cx);
         for (field, composer) in &self.fields {
             if field.is_secret() {
                 composer.update(cx, |composer, cx| composer.set_text("", cx));
@@ -7079,21 +7204,54 @@ impl Workbench {
         actions: impl IntoElement,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // Laid out after the Figma "Settings Modal - Appearance": search, a "Settings" heading
+        // over a divider, and the pages with icons.
         let current = self.settings_section;
-        let mut rail = ui::nav_rail();
-        for section in Section::ALL {
-            rail = rail.child(
-                ui::NavEntry::new(section.id(), section.label(), section == current).on_click(
-                    cx.listener(move |workbench, _event, window, cx| {
+        let query = self.settings_query.read(cx).text().to_string();
+        let mut options = div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .w_full()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .w_full()
+                    .child(ui::Label::new("Settings").muted())
+                    .child(div().w_full().h(px(1.)).bg(rgb(theme::border()))),
+            );
+        let mut any = false;
+        for section in Section::ALL.into_iter().filter(|section| section.matches(&query)) {
+            any = true;
+            options = options.child(
+                ui::NavEntry::new(section.id(), section.label(), section == current)
+                    .icon(section.icon())
+                    .on_click(cx.listener(move |workbench, _event, window, cx| {
                         workbench.settings_section = section;
                         // The field that had focus may not exist on the new page, and focus on
                         // an unrendered element stops key bindings arriving (docs §71).
                         workbench.focus_settings_page(window, cx);
                         cx.notify();
-                    }),
-                ),
+                    })),
             );
         }
+        if !any {
+            options = options.child(
+                div()
+                    .px_2p5()
+                    .py_1p5()
+                    .child(ui::Label::new("No settings match").muted()),
+            );
+        }
+        let rail = div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .w_full()
+            .child(ui::SearchBar::new(self.settings_query.clone()))
+            .child(options);
 
         let mut footer = div().flex().flex_col().gap_1();
         // What is still missing, before the user finds out from a failed turn. Shown on every
@@ -7132,9 +7290,11 @@ impl Workbench {
 
         ui::Modal::new("settings", "SETTINGS")
             .focus(&self.settings_focus)
-            // Wider than the 520px column it replaces: the rail takes 150 of it, and the
-            // Setup page has a check, a reason and two buttons to fit on a line.
-            .width(760.)
+            .framed()
+            // The Figma "Settings Modal" is 800 × 690; the rail takes 190 of it.
+            .width(800.)
+            // One size for every page, so switching sections doesn't make the window jump.
+            .height(690.)
             .nav(rail)
             .body(body)
             .actions(actions)
