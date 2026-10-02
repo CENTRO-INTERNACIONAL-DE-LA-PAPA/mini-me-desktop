@@ -58,8 +58,8 @@ const BUNDLE_MARKERS: [&str; 1] = ["scripts"];
 /// all**. A constant naming one spelling of a thing that has two is a constant that breaks on the
 /// day the second one ships.
 ///
-/// Any of these, because a bundle carries exactly one. `package.sh` still writes a `vendor/`
-/// beside it for as long as installs older than v0.3.15 might update — see the note it puts there.
+/// Any of these, because a bundle carries exactly one. `package.sh` writes `mini-me/` and no
+/// longer ships the empty `vendor/` marker; `vendor` stays accepted here because it costs nothing.
 ///
 /// `pub(crate)` so `backend.rs` can assert `release.sh` mentions every name the app accepts.
 /// The list living in one module and the gate that must match it living in another is exactly
@@ -1043,10 +1043,11 @@ mod tests {
             packager.contains("BACKEND_DEST=\"$OUT/mini-me\""),
             "package.sh must put the backend where bundled_backend_dir looks first"
         );
+        // `vendor/` is no longer shipped: the pre-v0.3.15 installs that required it also require
+        // `overlay/`, which no bundle has carried since v0.3.36, so it helped nobody.
         assert!(
-            packager.contains("mkdir -p \"$OUT/vendor\""),
-            "package.sh must still create vendor/ unconditionally — every install shipped before \
-             v0.3.15 rejects a download without one, and cannot be fixed remotely"
+            !packager.contains("mkdir -p \"$OUT/vendor\""),
+            "package.sh creates vendor/ again, which no install that can still update needs"
         );
         // The name the executable carries inside a bundle, which is the thing a `#[cfg]` split got
         // wrong: it made the name depend on the platform *inspecting* the zip rather than on the
