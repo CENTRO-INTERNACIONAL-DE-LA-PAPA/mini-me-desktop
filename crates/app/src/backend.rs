@@ -147,13 +147,34 @@ pub(crate) fn bundled_backend_dir() -> Option<PathBuf> {
 /// (`scripts/package.sh`), so it opens offline and always matches the version installed. A
 /// development build has no `manual/` folder; it falls back to the book as `quarto render
 /// docs/manual` leaves it, so the command can be tried without packaging.
-pub(crate) fn manual_index() -> Option<PathBuf> {
-    let packaged = resource("MINIME_MANUAL_DIR", "manual").join("index.html");
+/// The manual's two editions, each rendered into its own folder (`manual/en`, `manual/es`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManualLanguage {
+    English,
+    Spanish,
+}
+
+impl ManualLanguage {
+    fn folder(self) -> &'static str {
+        match self {
+            ManualLanguage::English => "en",
+            ManualLanguage::Spanish => "es",
+        }
+    }
+}
+
+pub(crate) fn manual_index(language: ManualLanguage) -> Option<PathBuf> {
+    let packaged = resource("MINIME_MANUAL_DIR", "manual")
+        .join(language.folder())
+        .join("index.html");
     if packaged.is_file() {
         return Some(packaged);
     }
     let rendered = normalized(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/manual/_book/index.html"),
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/manual/_book")
+            .join(language.folder())
+            .join("index.html"),
     );
     rendered.is_file().then_some(rendered)
 }

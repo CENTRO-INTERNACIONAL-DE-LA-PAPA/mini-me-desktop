@@ -20,3 +20,16 @@
 main img {
   border-radius: 8px;
 }
+
+/* The language switch sits beside the book title, centred on the title's line. */
+.sidebar-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.sidebar-title .sidebar-tools-main {
+  display: flex;
+  align-items: center;
+  margin: 0;
+}

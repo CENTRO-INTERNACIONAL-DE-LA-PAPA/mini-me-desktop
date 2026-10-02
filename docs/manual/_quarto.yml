@@ -1,47 +1,29 @@
+# Two editions of one book, English and Spanish, built from this folder with Quarto profiles:
+#
+#   quarto render --profile en    → _book/en/
+#   quarto render --profile es    → _book/es/
+#
+# A plain `quarto render` builds English. Settings shared by both live here; each edition's
+# title, chapter list and output folder live in _quarto-en.yml and _quarto-es.yml. A Spanish
+# page sits beside its English one as <name>.es.qmd, and both editions share images/.
+#
+# installing.qmd and first-time-setup.qmd are kept but left out of both editions for now
+# (Mini-Me is installed in advance for workshop users), and have no Spanish version yet.
+profile:
+  default: en
+
 project:
   type: book
-  output-dir: _book
-  # installing.qmd and first-time-setup.qmd are kept but left out of the book for now
-  # (Mini-Me is installed in advance for workshop users). To bring them back, delete the two
-  # "!" lines here and uncomment them under "Getting started" below.
-  render:
-    - "*.qmd"
-    - "!installing.qmd"
-    - "!first-time-setup.qmd"
 
 book:
-  title: "Mini-Me Desktop"
-  subtitle: "User Manual"
   author: "International Potato Center (CIP)"
   date: today
   search: true
-  chapters:
-    - index.qmd
-    - part: "Getting started"
-      chapters:
-        # - installing.qmd
-        # - first-time-setup.qmd
-        - the-window.qmd
-    - part: "Using Mini-Me"
-      chapters:
-        - asking-questions.qmd
-        - specialists.qmd
-        - projects.qmd
-        - results.qmd
-        - approvals.qmd
-    - part: "Settings and help"
-      chapters:
-        - settings.qmd
-        - troubleshooting.qmd
-  appendices:
-    - shortcuts.qmd
-    - glossary.qmd
 
 format:
   html:
-    theme:
-      light: cosmo
-      dark: darkly
+    # Light only: a single theme means Quarto shows no dark-mode toggle.
+    theme: cosmo
     css: styles.css
     toc: true
     number-sections: false

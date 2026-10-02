@@ -7402,7 +7402,7 @@ impl Workbench {
                 self.about_open = true;
                 cx.notify();
             }
-            Command::OpenManual => self.open_manual(cx),
+            Command::OpenManual => self.open_manual(backend::ManualLanguage::English, cx),
             Command::OpenProvenance => {
                 self.provenance_open = true;
                 cx.notify();
@@ -7415,10 +7415,10 @@ impl Workbench {
 
     /// Open the user manual that ships with this build, in the default browser.
     ///
-    /// The packaged `manual/index.html` rather than a URL: it works offline and always describes
+    /// The packaged `manual/<en|es>/index.html` rather than a URL: it works offline and always describes
     /// the version installed — the same reason the backend ships beside the executable.
-    pub(crate) fn open_manual(&mut self, cx: &mut Context<Self>) {
-        match backend::manual_index() {
+    pub(crate) fn open_manual(&mut self, language: backend::ManualLanguage, cx: &mut Context<Self>) {
+        match backend::manual_index(language) {
             Some(index) => match workspace::open(&index) {
                 Ok(()) => self.say("opened the user manual in your browser", cx),
                 Err(error) => {
@@ -8825,7 +8825,7 @@ mod tests {
         let source = include_str!("ui/modals.rs");
         assert!(source.contains("This MCP is not reachable at this time."));
         assert!(source.contains("Mini-Me will continue"));
-        assert!(source.contains("pierp.palacios@cgiar.org"));
+        assert!(source.contains("piero.palacios@cgiar.org"));
         assert!(source.contains("No conversation or saved work was removed."));
     }
 

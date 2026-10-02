@@ -64,5 +64,7 @@ this: signing in to Asta during setup is enough.
 **Version** shows which version of Mini-Me you have, for example
 *Mini-Me Desktop 0.3.40 (1c2e866)*. Include it when you report a problem.
 
-Click **Open user manual** to open this manual in your web browser. It comes with the app, so
-it works without an internet connection and always matches the version you have installed.
+Click **Open user manual** to open this manual in your web browser. For the Spanish edition,
+click **Abrir manual en español** (in the **Manual de usuario** row). The manual comes with the
+app, so it works without an internet connection and always matches the version you have
+installed.

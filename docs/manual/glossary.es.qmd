@@ -1,0 +1,60 @@
+# Glosario
+
+[**Clave de API (API key)**]{#api-key}
+: Un código largo, parecido a una contraseña, que permite a Mini-Me usar el servicio de una
+  compañía de IA (como OpenAI, Anthropic o Google). La compañía cobra a la cuenta a la que
+  pertenece la clave. Trátala como una contraseña: no la compartas ni la pegues en correos o
+  documentos. Tu líder de equipo o tu equipo de TI pueden decirte cómo obtener una.
+
+**Asta**
+: Un servicio de investigación del Allen Institute for AI. Mini-Me lo usa para buscar artículos
+  científicos, leer PDF y generar hipótesis. Algunas funciones de Asta usan **créditos**.
+
+**Backend**
+: La parte de Mini-Me que hace el trabajo de investigación en segundo plano. Nunca lo usas
+  directamente; la aplicación lo instala y lo ejecuta por ti.
+
+**CIP Dataverse**
+: El catálogo en línea de conjuntos de datos de investigación del Centro Internacional de la
+  Papa.
+
+**Conversación**
+: Un chat con Mini-Me, con su propio historial y sus propios archivos.
+
+**Coordinador (Coordinator)**
+: La parte de Mini-Me que lee tu pregunta y decide qué especialista debe hacer el trabajo.
+
+**Créditos**
+: Unidades que se usan para pagar algunos servicios de Asta, como AutoDiscovery. Mini-Me
+  siempre pregunta antes de gastarlos.
+
+**Hipótesis**
+: Una idea o posible explicación que se puede poner a prueba con datos.
+
+**Misión (Mission)**
+: Una o dos frases que describen de qué trata un proyecto. Mini-Me la lee cada vez que
+  preguntas algo.
+
+**Modelo**
+: El "cerebro" de IA que escribe las respuestas (por ejemplo, un modelo GPT, Claude o Gemini).
+
+**Pinboard**
+: El panel a la derecha de la ventana que reúne los resultados de una conversación.
+
+**Procedencia (Provenance)**
+: Un registro de cómo se obtuvo un resultado: qué especialistas trabajaron en él y en qué
+  orden.
+
+**Proveedor (Provider)**
+: La compañía de IA cuyo modelo usa Mini-Me (Anthropic, OpenAI, Google, Mistral…).
+
+**Proyecto**
+: Un grupo de conversaciones sobre un mismo tema, que comparten una misión y una carpeta.
+
+**Especialista**
+: Un miembro del equipo de Mini-Me que es bueno en una tarea, como encontrar artículos o limpiar
+  datos. Consulta [Conoce a los especialistas](specialists.es.qmd).
+
+**WSL (Subsistema de Windows para Linux)**
+: Una función incluida en Windows que le permite ejecutar programas de Linux. El backend de
+  Mini-Me la necesita. La aplicación la instala por ti durante la configuración.

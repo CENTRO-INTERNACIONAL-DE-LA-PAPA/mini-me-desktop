@@ -159,3 +159,41 @@ jobs:
 
             Both logs are rewritten on each launch, so they describe the run that just failed.
             Neither contains an API key.
+
+  # The user manual, both editions, published to GitHub Pages on every release tag:
+  #   https://<owner>.github.io/mini-me-desktop/en/   and   …/es/
+  # The site root redirects to English. Needs Settings → Pages → Source: "GitHub Actions".
+  # The app keeps opening the copy bundled in the zip, so this is for reading without the app.
+  manual:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: quarto-dev/quarto-actions/setup@v2
+
+      - name: Render both editions
+        run: |
+          quarto render docs/manual --profile en
+          quarto render docs/manual --profile es
+          cat > docs/manual/_book/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Mini-Me Desktop — User Manual</title>
+          <meta http-equiv="refresh" content="0; url=en/index.html">
+          <a href="en/index.html">English</a> · <a href="es/index.html">Español</a>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/manual/_book
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

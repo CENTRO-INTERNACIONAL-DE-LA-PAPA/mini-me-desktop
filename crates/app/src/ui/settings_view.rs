@@ -1025,7 +1025,18 @@ impl Workbench {
                     .text("Open user manual")
                     .style(ui::ButtonStyle::Secondary)
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.open_manual(cx);
+                        workbench.open_manual(backend::ManualLanguage::English, cx);
+                    })),
+            ));
+            // In Spanish because it is for the people who would rather read Spanish.
+            pane = pane.child(ui::setting_row(
+                "Manual de usuario",
+                "Ayuda paso a paso en español. Se abre en tu navegador.",
+                ui::Button::new("open-manual-es")
+                    .text("Abrir manual en español")
+                    .style(ui::ButtonStyle::Secondary)
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.open_manual(backend::ManualLanguage::Spanish, cx);
                     })),
             ));
         }

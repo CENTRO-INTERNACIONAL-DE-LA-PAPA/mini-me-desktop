@@ -1,0 +1,36 @@
+# Edición en español. See _quarto.yml.
+project:
+  output-dir: _book/es
+  render:
+    - "*.es.qmd"
+
+lang: es
+
+book:
+  title: "Mini-Me Desktop"
+  subtitle: "Manual de usuario"
+  author: "Centro Internacional de la Papa (CIP)"
+  sidebar:
+    tools:
+      - icon: translate
+        text: "English"
+        href: ../en/index.html
+  chapters:
+    - index.es.qmd
+    - part: "Primeros pasos"
+      chapters:
+        - the-window.es.qmd
+    - part: "Usar Mini-Me"
+      chapters:
+        - asking-questions.es.qmd
+        - specialists.es.qmd
+        - projects.es.qmd
+        - results.es.qmd
+        - approvals.es.qmd
+    - part: "Configuración y ayuda"
+      chapters:
+        - settings.es.qmd
+        - troubleshooting.es.qmd
+  appendices:
+    - shortcuts.es.qmd
+    - glossary.es.qmd

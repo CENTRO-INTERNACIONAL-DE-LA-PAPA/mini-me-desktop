@@ -1,0 +1,40 @@
+# English edition. See _quarto.yml.
+project:
+  output-dir: _book/en
+  render:
+    - "*.qmd"
+    - "!*.es.qmd"
+    - "!installing.qmd"
+    - "!first-time-setup.qmd"
+
+lang: en
+
+book:
+  title: "Mini-Me Desktop"
+  subtitle: "User Manual"
+  sidebar:
+    tools:
+      - icon: translate
+        text: "Español"
+        href: ../es/index.html
+  chapters:
+    - index.qmd
+    - part: "Getting started"
+      chapters:
+        # - installing.qmd
+        # - first-time-setup.qmd
+        - the-window.qmd
+    - part: "Using Mini-Me"
+      chapters:
+        - asking-questions.qmd
+        - specialists.qmd
+        - projects.qmd
+        - results.qmd
+        - approvals.qmd
+    - part: "Settings and help"
+      chapters:
+        - settings.qmd
+        - troubleshooting.qmd
+  appendices:
+    - shortcuts.qmd
+    - glossary.qmd

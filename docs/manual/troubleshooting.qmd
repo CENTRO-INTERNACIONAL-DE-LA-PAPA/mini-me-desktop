@@ -76,7 +76,7 @@ Open **Run setup checks** and look at **Conversation storage**. If it shows a pr
 If you still have a problem, contact the Mini-Me team:
 
 ::: {.callout-note title="Contact"}
-**TODO:** add the support contact (email, Teams channel, etc.).
+Contact someone at the **Digital & Data** team.
 :::
 
 To help them help you, include:

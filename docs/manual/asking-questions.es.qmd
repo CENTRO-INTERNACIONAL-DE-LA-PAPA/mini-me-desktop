@@ -1,0 +1,114 @@
+# Hacer preguntas
+
+## Tu primera pregunta
+
+1. Haz clic en el cuadro de la parte inferior de la ventana, donde dice **What are you working
+   on?**
+2. Escribe tu pregunta con palabras normales, como se la harías a un colega.
+3. Presiona **Enter** (o haz clic en el botón del avión de papel ➤).
+
+Mini-Me empieza a trabajar. Verás aparecer su respuesta poco a poco.
+
+![Iniciar una conversación nueva](images/chat-first-question.png)
+
+::: {.callout-tip title="¿No sabes qué preguntar?"}
+Una conversación nueva muestra algunos **ejemplos listos para usar**, como:
+
+- *Summarise what the literature says, with references*
+- *Find datasets in CIP Dataverse on a topic*
+- *Clean and profile a file I drop here*
+
+Haz clic en uno, completa la frase con tu propio tema y presiona **Enter**. Puedes escribir
+tus preguntas en español.
+:::
+
+## Consejos para hacer buenas preguntas
+
+- **Sé específico.** *"¿Qué dice la literatura sobre la resistencia al tizón tardío en
+  variedades de papa cultivadas en los Andes?"* funciona mejor que *"Háblame de la papa."*
+- **Di qué quieres recibir.** Por ejemplo: *"…con referencias"*, *"…en una tabla"*, *"…y haz
+  un gráfico"*.
+- **Un paso a la vez.** Siempre puedes hacer una pregunta de seguimiento. Mini-Me recuerda todo
+  lo dicho antes en la misma conversación.
+- **Pide primero un plan** si la tarea es grande: *"Haz un plan para estudiar…"*. Puedes
+  revisar el plan antes de que se haga nada.
+
+## Preguntas de ejemplo
+
+| Quieres… | Prueba a preguntar… |
+|---|---|
+| Revisar la literatura | *Resume la investigación reciente sobre tolerancia a la sequía en camote, con referencias.* |
+| Encontrar conjuntos de datos | *Busca en el CIP Dataverse conjuntos de datos sobre ensayos de rendimiento de papa en el Perú.* |
+| Revisar un archivo de datos | *Limpia y perfila el archivo que adjunté y dime qué contiene.* |
+| Explorar datos | *Muéstrame los principales patrones de estos datos, con gráficos.* |
+| Explicar un resultado | *¿Por qué podría ser menor el rendimiento en los ensayos de 2022? Revisa posibles factores de confusión.* |
+| Predecir | *Construye un modelo que prediga el rendimiento a partir de las columnas del clima y dime qué tan bueno es.* |
+| Obtener ideas | *Propón hipótesis sobre por qué esta variedad rinde mejor en altura.* |
+| Redactar | *Escribe un informe de todo lo que encontramos, con referencias.* |
+
+## Agregar tus propios archivos
+
+Puedes darle a Mini-Me tus propios archivos; por ejemplo, un **archivo de datos Excel/CSV** o
+**artículos en PDF**.
+
+1. Haz clic en el botón **Plus** (+) junto al cuadro de preguntas.
+2. Elige uno o varios archivos de tu computadora.
+3. Los archivos aparecen como pequeñas fichas encima del cuadro. Ahora escribe tu pregunta y
+   presiona **Enter**.
+
+![Adjuntar un archivo](images/chat-attach-file.png)
+
+::: {.callout-note}
+Mini-Me trabaja sobre una **copia** de tu archivo. El archivo original nunca se modifica.
+:::
+
+::: {.callout-warning}
+**No** adjuntes datos confidenciales ni personales, ni investigaciones no publicadas que no
+tengas permiso de compartir. Consulta [Ten en cuenta](index.es.qmd).
+:::
+
+## Mientras Mini-Me trabaja
+
+- La respuesta aparece **a medida que se escribe**.
+- Debajo de la respuesta puedes ver **qué especialista** respondió y un número de **pasos**.
+  Haz clic en los pasos para ver qué hizo cada especialista.
+- El [Pinboard](results.es.qmd) de la derecha se va llenando con el plan, los archivos y las
+  fuentes.
+- Para **detener** una respuesta, haz clic en el botón rojo de **detener** (donde normalmente
+  está el botón de enviar). La respuesta obtenida hasta ese momento queda en pantalla, marcada
+  como incompleta.
+
+Algunas tareas pueden pausarse y **pedirte permiso** antes de ejecutar algo en tu computadora o
+de gastar créditos. Consulta [Aprobaciones y créditos](approvals.es.qmd).
+
+![Una respuesta con sus pasos abiertos](images/chat-answer-with-steps.png)
+
+## Próximos pasos sugeridos
+
+Al final de una respuesta, Mini-Me puede mostrar **sugerencias** de qué hacer a continuación.
+Haz clic en una para ponerla en el cuadro de preguntas y luego presiona **Enter** para
+ejecutarla (o edítala antes).
+
+![Próximos pasos sugeridos](images/suggested-next.png)
+
+## Elegir tú mismo un especialista
+
+Normalmente no hace falta: el **Coordinator** "elige el mejor especialista en cada turno". Pero
+si sabes exactamente a quién quieres (por ejemplo, al **Report Writer**), puedes elegirlo:
+
+1. Pasa el puntero sobre la etiqueta redondeada **dentro del cuadro de preguntas, justo a la
+   izquierda del botón de enviar** (por defecto dice **Coordinator**).
+2. Aparece una lista de especialistas encima del cuadro de preguntas, a la derecha. Haz clic en
+   el que quieras.
+3. Tu próxima pregunta irá directamente a ese especialista.
+
+![Elegir un especialista](images/chat-pick-specialist.png)
+
+Consulta [Conoce a los especialistas](specialists.es.qmd) para saber qué hace cada uno.
+
+## Copiar texto
+
+- Selecciona texto en el chat con el mouse y presiona **`Ctrl+C`**.
+- **Haz clic derecho** en el chat para ver **Copy** (copiar), **Select all** (seleccionar todo)
+  y **Copy last answer** (copiar la última respuesta).
+- **`Ctrl+Shift+A`** selecciona toda la conversación.

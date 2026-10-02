@@ -1,0 +1,30 @@
+# Atajos de teclado
+
+| Teclas | Qué hacen |
+|---|---|
+| **Enter** | Envía tu pregunta. |
+| **`Ctrl+P`** | Abre la lista de comandos. |
+| **`Ctrl+,`** | Abre Settings (configuración). |
+| **Esc** | Cierra la ventana o lista que esté abierta. |
+| **`Ctrl+C`** | Copia el texto seleccionado. |
+| **`Ctrl+X`** / **`Ctrl+V`** | Corta / pega en el cuadro de preguntas. |
+| **`Ctrl+A`** | Selecciona todo el contenido del cuadro de preguntas. |
+| **`Ctrl+Shift+A`** | Selecciona toda la conversación. |
+
+## Comandos útiles de la lista `Ctrl+P`
+
+| Comando | Qué hace |
+|---|---|
+| **New thread** | Inicia una conversación nueva. |
+| **Put this conversation in a project** | Mueve la conversación actual a un proyecto (su carpeta también se mueve). |
+| **Save the latest report as a PDF** | Convierte el informe más reciente en un PDF con referencias, en la carpeta de la conversación. |
+| **Show this conversation's provenance** | Muestra qué especialistas trabajaron en esta conversación. |
+| **Expand agent activity** / **Collapse agent activity** | Muestra u oculta los detalles paso a paso debajo de cada respuesta. |
+| **Copy last answer** | Copia la respuesta más reciente de Mini-Me. |
+| **Run the named specialist in the background** | Escribe `/` y el nombre de un especialista al inicio de tu pregunta (por ejemplo, `/report_writer …`) y luego ejecuta este comando para enviarla como tarea en segundo plano sin esperar. |
+| **Restart the backend** | Resuelve muchos problemas de "no responde". |
+| **Run setup checks** | Vuelve a abrir la ventana Get Started. |
+| **Settings** | Abre Settings (configuración). |
+| **User manual** | Abre el manual en inglés en tu navegador. Para la versión en español, usa **Settings → Help → Manual de usuario**. |
+| **About Mini-Me** | Información de la versión, fuentes de datos y cómo citar. |
+| **Quit** | Cierra Mini-Me. |

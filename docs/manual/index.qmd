@@ -48,7 +48,3 @@ Mini-Me uses **generative AI**. It is a helpful assistant, but it can make mista
   intellectual property.
 - **Say that you used AI** when you share or publish work made with Mini-Me.
 :::
-
-::: {.callout-note title="About this manual"}
-This manual was drafted with the help of generative AI.
-:::

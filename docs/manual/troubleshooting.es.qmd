@@ -1,0 +1,94 @@
+# Solución de problemas
+
+La mayoría de los problemas se resuelven con uno de estos tres pasos. Pruébalos en este orden:
+
+1. **Vuelve a ejecutar las comprobaciones de configuración**: `Ctrl+P` → **Run setup checks**,
+   y luego haz clic en **Get Started**. Encuentra y corrige la mayoría de los problemas por sí
+   solo.
+2. **Reinicia el backend**: `Ctrl+P` → **Restart the backend**.
+3. **Cierra Mini-Me y ábrelo de nuevo.** Si eso no ayuda, reinicia tu computadora.
+
+## Problemas comunes
+
+### Windows dice "Windows protected your PC"
+
+Es normal la primera vez. Haz clic en **More info** (más información) y luego en **Run anyway**
+(ejecutar de todas formas).
+
+### La aplicación no abre o no funciona bien
+
+Comprueba que Mini-Me esté instalado en el lugar correcto:
+
+```
+C:\Program Files\mini-me-desktop\mini-me-desktop-app.exe
+```
+
+No funciona desde ninguna otra carpeta (Descargas, Documentos, el Escritorio…). Si el tuyo
+está en otro lugar, pide al equipo de Mini-Me que lo instale de nuevo. Un acceso directo en el
+Escritorio está bien; la aplicación en sí debe quedarse en Program Files.
+
+### Mini-Me no responde, o dice que no puede conectarse con el backend
+
+- Espera un minuto: el primer inicio después de encender la computadora puede ser lento.
+- Presiona `Ctrl+P` → **Restart the backend**.
+- Si eso no funciona, usa **Run setup checks**.
+
+### "You haven't added an API key"
+
+Mini-Me necesita una clave de API para responder. Agrega una en **Settings → Model → Keys**
+(consulta [Configuración](settings.es.qmd#model)).
+
+### La búsqueda de literatura o la generación de hipótesis dejó de funcionar
+
+Tu sesión de **Asta** caduca después de un tiempo (alrededor de una semana). Abre **Run setup
+checks**, busca el paso **Asta CLI** y haz clic en **Sign in again** (volver a iniciar sesión).
+
+Si dice que tu cuenta **"can't generate research theories"** (no puede generar teorías de
+investigación), la búsqueda de literatura sigue funcionando, pero necesitas otra cuenta de Asta
+para las hipótesis. Consulta con tu líder de equipo.
+
+### El Dataverse nunca encuentra conjuntos de datos
+
+Probablemente no has iniciado sesión en el CIP Dataverse. Abre **Run setup checks** y haz clic
+en **Sign in to CIP Dataverse**.
+
+### "Research service unavailable"
+
+Uno de los servicios en línea que usa Mini-Me no está respondiendo en este momento. Todo lo
+demás sigue funcionando. Vuelve a intentarlo más tarde.
+
+### La configuración se queda atascada al instalar WSL o Ubuntu
+
+- Busca una **ventana negra aparte**: la instalación se ejecuta allí, no dentro de Mini-Me.
+- Si Windows te pidió **reiniciar**, hazlo y luego abre Mini-Me de nuevo.
+- Si no tienes permisos de administrador, pide a tu equipo de TI que haga este paso contigo.
+
+### No encuentro un archivo que hizo Mini-Me
+
+- Busca en **Files**, en el Pinboard.
+- O abre la carpeta de la conversación con el enlace **Local Workspace** cerca de la parte
+  superior del chat. Todos los archivos están en `Documents\Mini-Me\`.
+
+### Mis conversaciones desaparecieron después de reiniciar
+
+Abre **Run setup checks** y mira **Conversation storage**. Si muestra un problema, haz clic en
+**Save conversations to disk**. (Las conversaciones anteriores a la corrección no se pueden
+recuperar.)
+
+## Pedir ayuda
+
+Si todavía tienes un problema, contacta al equipo de Mini-Me:
+
+::: {.callout-note title="Contacto"}
+Contacta a alguien del equipo de **Digital & Data**.
+:::
+
+Para que puedan ayudarte, incluye:
+
+1. **Qué estabas haciendo** y qué salió mal (una captura de pantalla ayuda).
+2. **La versión de Mini-Me**: está en **Settings → Help → Version**. También puedes presionar
+   `Ctrl+P` → **About Mini-Me** y copiar la línea que te pide incluir.
+3. **Los archivos de registro**: sus ubicaciones aparecen al final de la ventana **Run setup
+   checks** (*Sidecar log* y *App log*).
+
+![Dónde encontrar los archivos de registro](images/troubleshooting-logs.png)

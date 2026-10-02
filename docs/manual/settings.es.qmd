@@ -1,0 +1,73 @@
+# Configuración
+
+Abre la configuración (**Settings**) presionando **`Ctrl+,`** (Ctrl y coma), o presiona
+`Ctrl+P` y elige **Settings**.
+
+Settings tiene cinco páginas, listadas a la izquierda: **Appearance**, **Model**,
+**Research**, **Backend** y **Help**. Haz clic en una página para abrirla. Para encontrar una
+opción rápidamente, escribe en el cuadro **Search** que está sobre la lista; por ejemplo, *key*
+muestra **Model** y *port* muestra **Backend**. La búsqueda usa palabras en inglés.
+
+Después de hacer cambios, haz clic en **Save**, abajo a la izquierda. Guarda a la vez los
+cambios de todas las páginas. Haz clic en **Close** para salir sin guardar.
+
+![La ventana de Settings](images/settings-overview.png)
+
+## Appearance
+
+**Theme** (tema) cambia los colores de toda la ventana (por ejemplo, claro u oscuro). Abre la
+lista y **pasa el puntero sobre un tema para previsualizarlo**; haz clic en él para elegirlo y
+luego haz clic en **Save**.
+
+En **GET MORE** puedes explorar e **instalar** temas adicionales.
+
+## Model {#model}
+
+Esta página controla **qué IA** responde tus preguntas, y sus claves.
+
+- **Provider** (proveedor): la compañía de IA: Anthropic, OpenAI, Google, Mistral o *Custom
+  (OpenAI-compatible)*.
+- **Model** (modelo): cuál de los modelos de esa compañía usar. Elige uno de la lista, o
+  escribe su nombre en el cuadro de abajo si es más nuevo que los de la lista.
+- **Per specialist** (por especialista): puedes darles a algunos especialistas un modelo
+  distinto. Déjalos en **Use default** a menos que tengas una razón para cambiarlos.
+- **Keys** (claves): una clave de API por compañía. Haz clic en el nombre de la compañía, pega
+  la clave en el cuadro **API key** y haz clic en **Save**. Una marca (✓) indica qué compañías
+  ya tienen una clave. El cuadro muestra **· stored** cuando hay una clave guardada y **· not
+  set** cuando no la hay. Si ya hay una clave guardada, el cuadro **API key** vacío muestra una
+  fila de asteriscos (`********`). Si pegas una clave nueva y haces clic en **Save**, la
+  reemplaza.
+- **Base URL**: solo para proveedores *Custom*. Tu equipo de TI te la dará si la necesitas.
+
+![Agregar una clave de API](images/settings-keys.png)
+
+::: {.callout-note}
+Las claves se guardan en el **Administrador de credenciales de Windows**, nunca en un archivo
+normal, y no se vuelven a mostrar después de guardarlas. Usar el modelo de una compañía se
+**cobra a la cuenta de esa compañía**: la cuenta a la que pertenece la clave.
+:::
+
+## Research
+
+Aquí puedes pegar a mano un **Asta token** y una **Asta API key**. La mayoría de las personas
+no lo necesita: basta con iniciar sesión en Asta durante la configuración.
+
+## Backend
+
+| Opción | Qué hace | Recomendado |
+|---|---|---|
+| **Ask before every command** | Pausa y muestra cada programa antes de que se ejecute en tu computadora. Consulta [Aprobaciones](approvals.es.qmd). | Activado |
+| **Let work run in the background** | Las tareas largas siguen ejecutándose mientras sigues haciendo preguntas. | A tu elección |
+| **Show what ran** | Agrega una línea al Pinboard con los programas que ejecutó esta conversación y si alguno guardó archivos fuera de su carpeta. Útil para revisar tu trabajo. | Desactivado, salvo que lo necesites |
+| **Run setup checks** | Abre la ventana **Get Started**, que revisa tu computadora y corrige problemas. | — |
+| **Backend port** | Una opción técnica. Déjala como está, a menos que TI te pida cambiarla. | `2024` |
+
+## Help
+
+**Version** muestra qué versión de Mini-Me tienes; por ejemplo,
+*Mini-Me Desktop 0.3.40 (1c2e866)*. Inclúyela cuando informes un problema.
+
+Haz clic en **Abrir manual en español** (en la fila **Manual de usuario**) para abrir este
+manual en tu navegador web, o en **Open user manual** para abrir la versión en inglés. El manual
+viene con la aplicación, así que funciona sin conexión a internet y siempre corresponde a la
+versión que tienes instalada.
