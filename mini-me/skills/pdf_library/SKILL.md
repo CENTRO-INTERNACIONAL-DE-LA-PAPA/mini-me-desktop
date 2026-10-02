@@ -58,6 +58,13 @@ When a user message starts with a blockquote like
 those PDFs are already on disk at the given relative path (e.g. `./report.pdf`).
 Do **not** ask the user to upload them again. Use those exact relative paths.
 
+If you were given a PDF's name but no path, run `ls -la` in the working directory
+**first**: attached files sit at its root (`./<name>.pdf`), not in `./papers/`, which
+only holds papers you downloaded yourself. Quote paths that contain spaces.
+
+**Never write a placeholder file** in place of a PDF you could not find or read. Say
+what you looked for and where, and stop.
+
 ## Step 0 — Download open-access PDFs (only when the files are not on disk)
 
 If the user asks you to read/index papers that were **discovered** (by

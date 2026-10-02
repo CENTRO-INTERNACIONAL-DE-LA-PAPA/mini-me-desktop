@@ -57,6 +57,7 @@ from backend.datavoyager_tools import analyze_data
 from backend.prompts import COORDINATOR_SYSTEM_PROMPT
 from backend.subagents import _build_runtime_subagents, request_diagnostic_context
 from backend.paper_tools import find_papers
+from backend.pdf_tools import read_pdf
 from backend.theory_tools import generate_theories
 
 
@@ -132,6 +133,8 @@ async def agent(config: RunnableConfig):
     if is_execution and _is_production_mode():
         _require_model_keys(model_resolver, subagent_overrides)
     coordinator_model = model_resolver.coordinator()
+    # So `read_file` never hands this model an attachment it cannot take (workspace.py).
+    sandbox_backend.adapt_to_model(coordinator_model)
 
     # `find_papers` first, and alongside the MCP bundle rather than instead of it. It returns
     # each paper with its reference already built from the record (`backend/citations.py`), which
@@ -205,6 +208,8 @@ async def agent(config: RunnableConfig):
 
     return create_deep_agent(
         model=coordinator_model,
+        # Its own tool because `read_file` cannot pass a PDF to most models (see pdf_tools.py).
+        tools=[read_pdf],
         system_prompt=coordinator_prompt,
         subagents=runtime_subagents,
         skills=["/skills/"],

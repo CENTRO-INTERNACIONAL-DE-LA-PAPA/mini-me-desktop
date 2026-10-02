@@ -34,7 +34,8 @@ from pathlib import Path
 from typing import Any
 
 from deepagents.backends.local_shell import LocalShellBackend
-from deepagents.backends.protocol import ExecuteResponse
+from deepagents.backends.protocol import ExecuteResponse, ReadResult, WriteResult
+from deepagents.backends.utils import _get_backend_read_file_type
 
 # Imported from the sandbox module rather than reimplemented, so the local path truncates
 # execute output exactly as the remote-sandbox path does — the cap protects the model's context
@@ -516,6 +517,16 @@ def _command_env() -> dict[str, str]:
     return env
 
 
+#: Files `write_file` must never overwrite: it writes text, so over any of these it can only destroy.
+_BINARY_SUFFIXES = frozenset(
+    {
+        ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".pptx", ".ppt", ".odt", ".ods",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".tif", ".tiff", ".bmp",
+        ".zip", ".gz", ".tar", ".7z", ".parquet", ".feather", ".sqlite", ".db",
+    }
+)
+
+
 class LocalWorkspaceBackend(LocalShellBackend):
     """A per-thread directory on the host, standing in for a sandbox VM.
 
@@ -590,6 +601,35 @@ class LocalWorkspaceBackend(LocalShellBackend):
             # all; `_command_env` is already a copy of ours with PATH fixed up.
             inherit_env=False,
         )
+        # What the model this conversation runs on can take as an attachment; see `adapt_to_model`.
+        # The defaults leave `read_file` exactly as deepagents ships it, which is right for the
+        # routes that build a backend only to list or download files.
+        self.pdf_attachments = True
+        self.strict_attachments = False
+
+    def adapt_to_model(self, model: Any) -> None:
+        """Remember what `model` can take as an attachment, so `read` never sends what it cannot.
+
+        - **PDFs:** Claude and Gemini read a PDF attachment natively — scans and figures
+          included — so it is left to them. A model whose profile rules PDFs out gets pointed at
+          `read_pdf`, which extracts the text.
+        - **Everything else that is not text or an image:** deepagents lets any non-PDF `file`
+          attachment through for an OpenAI-class model whatever its profile says, and the Chat
+          Completions API (every OpenRouter model) then refuses the whole request with a 400 — a
+          `.pptx`, a `.mkv` — and the file stays in the history, failing every later turn too. For
+          those models such files are reported as unsupported instead.
+        """
+        profile = getattr(model, "profile", None)
+        profile = profile if isinstance(profile, dict) else {}
+        self.pdf_attachments = (
+            profile.get("pdf_tool_message") is not False and profile.get("pdf_inputs") is not False
+        )
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError:
+            self.strict_attachments = False
+        else:
+            self.strict_attachments = isinstance(model, ChatOpenAI)
 
     # -- lifecycle ---------------------------------------------------------------
     #
@@ -652,7 +692,13 @@ class LocalWorkspaceBackend(LocalShellBackend):
         return resolved
 
     def _reroute_write(self, path: str) -> str:
-        """Send a write outside the workspace to ``<workspace>/<basename>``.
+        """Send a write outside the workspace into it.
+
+        **The subfolders are kept** when the path is not a real place on this machine. This used to keep only the basename, and deepagents turns
+        `./papers/x.pdf` into `/papers/x.pdf` before the backend sees it — so a specialist writing
+        into `./papers/` wrote into the workspace root instead, *over a file of the same name*.
+        That is how the PDF Librarian replaced a researcher's attached 7.9 MB report with a
+        one-line placeholder, and why `ls ./papers` never found the folder it kept writing to.
 
         Mirrors upstream's ``_resolve_for_write``. The deepagents virtual filesystem
         hands the model's "project root" writes through as ``/report.md``; in a remote
@@ -670,14 +716,72 @@ class LocalWorkspaceBackend(LocalShellBackend):
         try:
             candidate.relative_to(self._work_dir)
         except ValueError:
-            return str(self._work_dir / candidate.name)
+            # A real place on this machine (`/tmp/x.csv`, `/mnt/c/.../Desktop/out.csv`, the
+            # conversation folder seen from a background worker): only the name comes along, or the
+            # whole host path would be rebuilt inside the workspace. A path that exists nowhere
+            # (`/papers/x.pdf`, which is `./papers/x.pdf` after deepagents) keeps its subfolders.
+            if candidate.parent.exists():
+                return str(self._work_dir / candidate.name)
+            return str(self._work_dir / candidate.relative_to(candidate.anchor))
         return path
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        """Read a file, but never hand the model an attachment it cannot take.
+
+        An unsupported attachment does not fail politely: the provider refuses the whole request,
+        the run ends, and the file stays in the history so every later turn fails the same way. A
+        plain sentence in the tool result is reported to the user instead — see `adapt_to_model`.
+        """
+        if isinstance(file_path, str):
+            suffix = Path(file_path).suffix.lower()
+            if suffix == ".pdf" and not self.pdf_attachments:
+                return ReadResult(
+                    error=(
+                        f"'{file_path}' is a PDF, which this model cannot receive as an "
+                        f"attachment. Call the read_pdf tool with file_path='{file_path}' to get "
+                        "its text. If you do not have read_pdf, extract the text with execute: "
+                        "python3 -c \"import sys; from pypdf import PdfReader; "
+                        "print('\\n'.join(p.extract_text() or '' for p in "
+                        "PdfReader(sys.argv[1]).pages))\" '<path>'"
+                    )
+                )
+            if (
+                self.strict_attachments
+                and suffix != ".pdf"
+                and _get_backend_read_file_type(file_path) not in ("text", "image")
+            ):
+                hint = " Ask them to export it as a PDF." if suffix in (".ppt", ".pptx") else ""
+                return ReadResult(
+                    error=(
+                        f"'{file_path}' is a {suffix or 'binary'} file, which this model cannot "
+                        f"read. Tell the user this file format is not supported here.{hint}"
+                    )
+                )
+        return super().read(file_path, offset, limit)
 
     def write(self, file_path: str, content: str):
         path = self._reroute_write(file_path)
+        # **Text never replaces an existing binary file.** `write_file` only writes text, so a
+        # write onto a PDF, spreadsheet or image can only destroy it — which is what a specialist
+        # did to an attached report, leaving "This is a placeholder for the content of the PDF".
+        try:
+            target = self._resolve_path(path)
+            clobbers = target.suffix.lower() in _BINARY_SUFFIXES and target.is_file()
+        except (OSError, RuntimeError, ValueError):
+            # Not this guard's error to report: `super().write` turns a bad path into a readable one.
+            clobbers = False
+        if clobbers:
+            return WriteResult(
+                error=(
+                    f"Refusing to overwrite '{file_path}': it is an existing {target.suffix} file, "
+                    "probably one the user attached, and write_file would replace it with text. "
+                    "Write your output to a new file name instead."
+                )
+            )
         result = super().write(path, content)
         # After the write, so a failed one is not recorded as having happened.
-        authorship.record(self._work_dir, [path])
+        if not getattr(result, "error", None):
+            authorship.record(self._work_dir, [path])
         return result
 
     def upload_files(self, files: list[tuple[str, bytes]]):

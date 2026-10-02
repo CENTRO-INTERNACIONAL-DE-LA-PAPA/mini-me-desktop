@@ -47,3 +47,39 @@ def test_a_missing_file_is_still_reported_missing(tmp_path, monkeypatch):
     result = backend.read(validate_path("./not-there.txt"))
 
     assert result.error
+
+
+def test_a_write_into_a_subfolder_stays_in_that_subfolder(tmp_path, monkeypatch):
+    """`./papers/notes.md` arrives as `/papers/notes.md`; it must not be flattened to the root."""
+    backend = _backend(tmp_path, monkeypatch, "thread-d")
+
+    result = backend.write(validate_path("./papers/notes.md"), "hello")
+
+    assert not result.error, result.error
+    assert (tmp_path / "thread-d" / "papers" / "notes.md").read_text() == "hello"
+    assert not (tmp_path / "thread-d" / "notes.md").exists()
+
+
+def test_text_never_overwrites_an_attached_pdf(tmp_path, monkeypatch):
+    """How an attached 7.9 MB report became a one-line placeholder."""
+    backend = _backend(tmp_path, monkeypatch, "thread-e")
+    attached = tmp_path / "thread-e" / "report 1.pdf"
+    attached.write_bytes(b"%PDF-1.7 the real report")
+
+    result = backend.write(validate_path("./report 1.pdf"), "This is a placeholder")
+
+    assert result.error and "Refusing to overwrite" in result.error
+    assert attached.read_bytes() == b"%PDF-1.7 the real report"
+
+
+def test_a_real_absolute_path_keeps_only_its_name(tmp_path, monkeypatch):
+    """`/tmp/x.csv` is a real place on this machine; rebuilding `tmp/` inside the workspace buries it."""
+    backend = _backend(tmp_path, monkeypatch, "thread-f")
+    elsewhere = tmp_path / "outside" / "out.csv"
+    elsewhere.parent.mkdir()
+
+    result = backend.write(str(elsewhere), "a,b")
+
+    assert not result.error, result.error
+    assert (tmp_path / "thread-f" / "out.csv").read_text() == "a,b"
+    assert not elsewhere.exists(), "a write never lands outside the workspace"

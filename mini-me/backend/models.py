@@ -101,7 +101,43 @@ def build_chat_model(spec: str, key_record: dict[str, Any] | None):
     if base_url:
         kwargs["base_url"] = base_url
 
-    return init_chat_model(model=model_id, model_provider=pspec["lc_provider"], **kwargs)
+    model = init_chat_model(model=model_id, model_provider=pspec["lc_provider"], **kwargs)
+    unsupported = UNSUPPORTED_ATTACHMENTS.get(provider)
+    if unsupported:
+        # Merged over whatever the provider's own profile says, so its other fields (context
+        # window, and any attachment it does declare) survive.
+        model.profile = {**(model.profile or {}), **unsupported}
+    return model
+
+
+#: Attachments each provider cannot take, as `ModelProfile` fields deepagents reads.
+#:
+#: **An unsupported file must be reported, never crash the run.** deepagents' `read_file` hands
+#: images, audio, video and PDFs to the model as attachments, and before every model call it swaps
+#: each one the profile rules out for a note — *"[read_file: x was not attached because this model
+#: does not support … content]"* — across the whole history, so a conversation that already holds
+#: one recovers too. But a field the profile does not mention counts as supported, and most models
+#: here have no profile at all (every OpenRouter id). A provider then refuses the request with a
+#: 400 and the run ends; the file stays in the history, so every later message fails the same way.
+#:
+#: Through OpenRouter that is `400 Invalid value: 'file'. Supported values are: 'text', 'refusal',
+#: 'image_url', and 'input_audio'` for a PDF. Google takes all of these, so it is left alone.
+#: PDFs are read as text by `read_pdf` anyway; this is the net under it.
+UNSUPPORTED_ATTACHMENTS: dict[str, dict[str, bool]] = {
+    # OpenAI's Chat Completions format, which OpenRouter speaks for every model behind it: images
+    # yes, `file` blocks no, and audio only on audio models.
+    "openai": {"pdf_tool_message": False, "audio_inputs": False, "video_inputs": False},
+    "custom": {"pdf_tool_message": False, "audio_inputs": False, "video_inputs": False},
+    # Claude reads images and PDFs in a tool result, not audio or video.
+    "anthropic": {"audio_inputs": False, "video_inputs": False},
+    # Mistral's tool results are text.
+    "mistral": {
+        "image_tool_message": False,
+        "pdf_inputs": False,
+        "audio_inputs": False,
+        "video_inputs": False,
+    },
+}
 
 
 class _ModelResolver:
