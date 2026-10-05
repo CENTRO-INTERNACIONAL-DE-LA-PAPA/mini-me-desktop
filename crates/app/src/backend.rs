@@ -3117,6 +3117,13 @@ mod tests {
     /// script still exited 0. Only executing it says which.
     #[test]
     fn a_failing_step_is_not_rescued_by_the_next_ones_fallback() {
+        // Needs a POSIX `sh`. On Windows that is Git's, which is on PATH in Git Bash and CI but
+        // not in a plain PowerShell — skipped there rather than failed, so the check still runs
+        // wherever it can instead of being deleted.
+        if std::process::Command::new("sh").arg("-c").arg("true").output().is_err() {
+            eprintln!("skipped: no `sh` on PATH (run `cargo test` from Git Bash to include this)");
+            return;
+        }
         let run = |steps: &[&str]| {
             let script =
                 join_prepare_steps(&steps.iter().map(|s| (*s).to_string()).collect::<Vec<_>>());

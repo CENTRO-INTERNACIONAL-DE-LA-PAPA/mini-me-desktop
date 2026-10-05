@@ -433,7 +433,9 @@ impl Workbench {
                     ),
             );
         }
-        if let Some(result) = &self.key_test {
+        // Only while it still describes the key and provider on screen.
+        let current = self.key_test_is_current(cx);
+        if let Some(result) = self.key_test.as_ref().filter(|_| current) {
             let (text, colour) = match result {
                 KeyTest::Running => ("asking the provider…".to_string(), theme::text_muted()),
                 KeyTest::Passed(message) => (format!("✓ {message}"), theme::text()),

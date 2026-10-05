@@ -276,6 +276,15 @@ fn named_files(text: &str) -> Vec<String> {
 /// nothing about the real key's.
 const STORED_KEY_PLACEHOLDER: &str = "********************";
 
+/// A fingerprint of what was in the key field, so a test result can tell the key changed without
+/// keeping a copy of it.
+fn key_fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Where a "Test key" press has got to.
 #[derive(Clone, Debug)]
 enum KeyTest {
@@ -2345,6 +2354,10 @@ struct Workbench {
     onboarding_history: Vec<OnboardingStepResult>,
     /// The Get Started key step's "Test key" result: `None` until pressed.
     key_test: Option<KeyTest>,
+    /// Which provider and key `key_test` is about, as a fingerprint of the field — never the key
+    /// itself. A result is only shown while both still match, so a ✓ for one key cannot sit
+    /// under a different key or provider.
+    key_tested: Option<(String, u64)>,
     /// Steps the user chose to skip for this session: the auto-run walks past them. Skipping
     /// a required one never counts as finishing onboarding, so it comes back next launch.
     onboarding_skipped: Vec<&'static str>,
@@ -2885,6 +2898,7 @@ impl Workbench {
             onboarding_awaiting_manual: None,
             onboarding_history: Vec::new(),
             key_test: None,
+            key_tested: None,
             onboarding_skipped: Vec::new(),
             onboarding_focus: cx.focus_handle(),
             pending_approval: None,
@@ -3597,6 +3611,7 @@ impl Workbench {
     /// otherwise the one already in the keychain. Nothing is saved.
     fn test_onboarding_key(&mut self, cx: &mut Context<Self>) {
         let typed = self.field_text(Field::ApiKey, cx);
+        self.key_tested = Some((self.draft.provider.clone(), key_fingerprint(&typed)));
         // Read here, on the main thread — the keychain is not safe to touch from a Tokio worker.
         let key = if typed.is_empty() {
             settings::secret(&format!("llm:{}", self.draft.provider))
@@ -3627,6 +3642,15 @@ impl Workbench {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Whether the "Test key" result still describes what is on screen: same provider, same text
+    /// in the key field.
+    fn key_test_is_current(&self, cx: &App) -> bool {
+        let typed = self.field_text(Field::ApiKey, cx);
+        self.key_tested.as_ref().is_some_and(|(provider, fingerprint)| {
+            *provider == self.draft.provider && *fingerprint == key_fingerprint(&typed)
+        })
     }
 
     /// Bound to the modal's "Get Started" button: begin auto-running every pending check's
@@ -4870,6 +4894,9 @@ impl Workbench {
         );
         match update::begin_swap(&plan) {
             Ok(()) => {
+                // The backend outlives the app, and the new build would otherwise attach to it
+                // still running the old code — so it goes first.
+                self.sidecar.stop_backend_for_update();
                 // The helper is waiting on this pid, so the last useful act is to stop existing.
                 self.status = "restarting into the new build…".into();
                 cx.notify();

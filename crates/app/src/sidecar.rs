@@ -9,6 +9,7 @@
 //! which the root view holds for the whole session. Individual turns are just
 //! tasks on that runtime, so ending a turn never kills the backend.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex};
 
 use anyhow::{Context as _, Result};
@@ -275,11 +276,20 @@ pub struct Sidecar {
     config: BackendConfig,
     /// The turn currently in flight, so it can be stopped. See [`Sidecar::cancel_turn`].
     running: Arc<SyncMutex<Option<RunningTurn>>>,
+    /// Numbers each stream as it starts, so a finishing one can tell whether the slot above is
+    /// still its own. See [`RunningTurn::generation`].
+    turns: AtomicU64,
 }
 
 /// A turn being streamed right now.
 #[derive(Default)]
 struct RunningTurn {
+    /// Which stream this is. **A finishing stream clears the slot only if it is still its own.**
+    /// After an approval the resume registers while the stream that raised it is still closing;
+    /// that older stream then wiped the resume's record, so Stop could not cancel the run that
+    /// was actually going, said "the run had not reported an id yet", and the next message
+    /// queued behind a run nobody could see.
+    generation: u64,
     /// The task pumping the SSE stream. Aborting it drops the HTTP response, which closes
     /// the connection — the client half of a cancel.
     task: Option<tokio::task::JoinHandle<()>>,
@@ -287,6 +297,26 @@ struct RunningTurn {
     /// milliseconds before that frame arrives, and the reason `cancel_turn` reports whether
     /// it could reach the server at all.
     run_id: Option<String>,
+}
+
+impl RunningTurn {
+    /// Note the run id LangGraph gave stream `generation`, if that stream is still current.
+    fn record_run_id(slot: &SyncMutex<Option<RunningTurn>>, generation: u64, run_id: &str) {
+        if let Ok(mut slot) = slot.lock() {
+            if let Some(turn) = slot.as_mut().filter(|turn| turn.generation == generation) {
+                turn.run_id = Some(run_id.to_string());
+            }
+        }
+    }
+
+    /// Clear the slot when stream `generation` ends — only if no newer stream has taken it.
+    fn finish(slot: &SyncMutex<Option<RunningTurn>>, generation: u64) {
+        if let Ok(mut slot) = slot.lock() {
+            if slot.as_ref().is_some_and(|turn| turn.generation == generation) {
+                *slot = None;
+            }
+        }
+    }
 }
 
 /// What a restart reports while it is happening.
@@ -325,6 +355,7 @@ impl Sidecar {
             execution,
             config: redacted,
             running: Arc::new(SyncMutex::new(None)),
+            turns: AtomicU64::new(0),
         })
     }
 
@@ -368,6 +399,7 @@ impl Sidecar {
 
         let running = self.running.clone();
         let record = running.clone();
+        let generation = self.begin_turn();
         let task = self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url)
                 .with_model(model)
@@ -377,11 +409,7 @@ impl Sidecar {
                 // Noted on the way past rather than asked for separately: this is the only
                 // moment LangGraph names the run, and `cancel_turn` needs that name.
                 if let TurnEvent::Started { run_id } = &event {
-                    if let Ok(mut slot) = record.lock() {
-                        if let Some(turn) = slot.as_mut() {
-                            turn.run_id = Some(run_id.clone());
-                        }
-                    }
+                    RunningTurn::record_run_id(&record, generation, run_id);
                 }
                 let _ = tx.unbounded_send(event);
             };
@@ -407,26 +435,38 @@ impl Sidecar {
                 Err(error) => emit(TurnEvent::Error(format!("{error:#}"))),
             }
             // However it ended, there is nothing left to cancel.
-            if let Ok(mut slot) = running.lock() {
-                *slot = None;
-            }
+            RunningTurn::finish(&running, generation);
         });
-        self.register(task);
+        self.attach(generation, task);
 
         rx
     }
 
-    /// Remember the task streaming the current turn, so it can be stopped.
+    /// Claim the slot for a stream about to start, before it is spawned, so its first
+    /// `Started` frame always has somewhere to land.
     ///
-    /// Replaces whatever was there: the UI refuses to start a turn while one is running, so
-    /// two live at once would be a bug elsewhere — and keeping the newer one is the reading
-    /// that cannot strand the stop button on a task that has already finished.
-    fn register(&self, task: tokio::task::JoinHandle<()>) {
+    /// Replaces whatever was there: the newest stream is the one Stop must reach. The previous
+    /// run id is *not* carried over — that run has already ended (an approval ends it; the
+    /// resume is a new run), so cancelling it would stop nothing.
+    fn begin_turn(&self) -> u64 {
+        let generation = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
         if let Ok(mut slot) = self.running.lock() {
             *slot = Some(RunningTurn {
-                task: Some(task),
-                run_id: slot.as_mut().and_then(|turn| turn.run_id.take()),
+                generation,
+                task: None,
+                run_id: None,
             });
+        }
+        generation
+    }
+
+    /// Hand the spawned stream to its slot, so Stop can abort it — unless it has already
+    /// finished or been superseded, in which case there is nothing to stop.
+    fn attach(&self, generation: u64, task: tokio::task::JoinHandle<()>) {
+        if let Ok(mut slot) = self.running.lock() {
+            if let Some(turn) = slot.as_mut().filter(|turn| turn.generation == generation) {
+                turn.task = Some(task);
+            }
         }
     }
 
@@ -499,17 +539,14 @@ impl Sidecar {
         // for stop.
         let running = self.running.clone();
         let record = running.clone();
+        let generation = self.begin_turn();
         let task = self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url)
                 .with_model(model)
                 .with_project(project);
             let mut emit = |event: TurnEvent| {
                 if let TurnEvent::Started { run_id } = &event {
-                    if let Ok(mut slot) = record.lock() {
-                        if let Some(turn) = slot.as_mut() {
-                            turn.run_id = Some(run_id.clone());
-                        }
-                    }
+                    RunningTurn::record_run_id(&record, generation, run_id);
                 }
                 let _ = tx.unbounded_send(event);
             };
@@ -517,6 +554,7 @@ impl Sidecar {
                 emit(TurnEvent::Error(
                     "there is no thread to resume — the run was already lost".into(),
                 ));
+                RunningTurn::finish(&running, generation);
                 return;
             };
             match client.resume_turn(&thread_id, &answers, &mut emit).await {
@@ -526,11 +564,9 @@ impl Sidecar {
                 Ok(TurnOutcome::Finished) => emit(TurnEvent::Done),
                 Err(error) => emit(TurnEvent::Error(format!("{error:#}"))),
             }
-            if let Ok(mut slot) = running.lock() {
-                *slot = None;
-            }
+            RunningTurn::finish(&running, generation);
         });
-        self.register(task);
+        self.attach(generation, task);
 
         rx
     }
@@ -547,17 +583,14 @@ impl Sidecar {
         let project = self.project();
         let running = self.running.clone();
         let record = running.clone();
+        let generation = self.begin_turn();
         let task = self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url)
                 .with_model(model)
                 .with_project(project);
             let mut emit = |event: TurnEvent| {
                 if let TurnEvent::Started { run_id } = &event {
-                    if let Ok(mut slot) = record.lock() {
-                        if let Some(turn) = slot.as_mut() {
-                            turn.run_id = Some(run_id.clone());
-                        }
-                    }
+                    RunningTurn::record_run_id(&record, generation, run_id);
                 }
                 let _ = tx.unbounded_send(event);
             };
@@ -565,6 +598,7 @@ impl Sidecar {
                 emit(TurnEvent::Error(
                     "there is no thread to resume — the MCP request was already lost".into(),
                 ));
+                RunningTurn::finish(&running, generation);
                 return;
             };
             match client
@@ -575,11 +609,9 @@ impl Sidecar {
                 Ok(TurnOutcome::Finished) => emit(TurnEvent::Done),
                 Err(error) => emit(TurnEvent::Error(format!("{error:#}"))),
             }
-            if let Ok(mut slot) = running.lock() {
-                *slot = None;
-            }
+            RunningTurn::finish(&running, generation);
         });
-        self.register(task);
+        self.attach(generation, task);
 
         rx
     }
@@ -859,6 +891,34 @@ impl Sidecar {
             let _ = tx.unbounded_send(outcome);
         });
         rx
+    }
+
+    /// Stop the backend before the app exits to install an update, and wait for it.
+    ///
+    /// `langgraph dev` outlives the app, and the next launch attaches to any healthy backend
+    /// rather than replacing it — so without this the new build kept talking to a server still
+    /// running the previous build's Python and dependencies, and a backend change (a pinned
+    /// package, a fix) reached nobody until someone pressed Restart backend. Stopped here, the
+    /// new build's first launch copies its backend over, syncs the lock and starts it fresh.
+    ///
+    /// Bounded: if a turn is holding the supervisor, waiting longer would only delay the update.
+    pub fn stop_backend_for_update(&self) {
+        let supervisor = self.supervisor.clone();
+        let stopped = self.runtime.block_on(async move {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), supervisor.lock()).await {
+                Ok(mut supervisor) => {
+                    supervisor.stop();
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+        if !stopped {
+            tracing::warn!(
+                "could not stop the backend before updating — the new build may attach to the old \
+                 one until Restart backend is pressed"
+            );
+        }
     }
 
     /// Stop the backend and start it again, reporting what happened.
@@ -2115,4 +2175,32 @@ async fn repair_one(
     }
     let body: serde_json::Value = response.json().await.ok()?;
     references::best_match(citation, &references::candidates_of(&body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_finishing_stream_never_clears_a_newer_ones_record() {
+        // The approval race: the resume (2) has registered and named its run while the stream
+        // that raised the approval (1) is still closing.
+        let slot = SyncMutex::new(Some(RunningTurn {
+            generation: 2,
+            task: None,
+            run_id: None,
+        }));
+        RunningTurn::record_run_id(&slot, 2, "run-b");
+        RunningTurn::record_run_id(&slot, 1, "run-a");
+        RunningTurn::finish(&slot, 1);
+
+        {
+            let guard = slot.lock().unwrap();
+            let turn = guard.as_ref().expect("the resume's record survives the old stream ending");
+            assert_eq!(turn.run_id.as_deref(), Some("run-b"));
+        }
+
+        RunningTurn::finish(&slot, 2);
+        assert!(slot.lock().unwrap().is_none());
+    }
 }

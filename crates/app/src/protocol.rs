@@ -26,7 +26,7 @@
 //! In local dev the backend needs no `Authorization` header (`backend/auth.py`
 //! admits an unauthenticated `local-user`) and falls back to `OPENAI_API_KEY`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt;
@@ -3526,6 +3526,9 @@ const DELEGATE_TOOL: &str = "task";
 pub struct TurnDecoder {
     /// Tool calls still streaming their arguments, keyed by (namespace, index).
     calls: HashMap<(String, i64), PendingCall>,
+    /// Ids of messages already seen as chunks, so the same message arriving whole is not
+    /// shown twice.
+    streamed: HashSet<String>,
 }
 
 struct PendingCall {
@@ -3609,11 +3612,26 @@ impl TurnDecoder {
         let Some(chunk) = value.get(0) else {
             return Vec::new();
         };
-        if chunk.get("type").and_then(Value::as_str) != Some("AIMessageChunk") {
+        let id = chunk.get("id").and_then(Value::as_str);
+        match chunk.get("type").and_then(Value::as_str) {
+            Some("AIMessageChunk") => {
+                if let Some(id) = id {
+                    self.streamed.insert(id.to_string());
+                }
+            }
+            // **A whole assistant message**, not streamed in chunks: what a middleware writes
+            // when it ends a run itself — "Model call limits exceeded …" — or a model that
+            // does not stream. Dropping these made a turn end on "done" with no reason given.
+            // One already streamed as chunks is skipped.
+            Some("ai" | "AIMessage") => {
+                if id.is_some_and(|id| self.streamed.contains(id)) {
+                    return Vec::new();
+                }
+            }
             // `ToolMessage` frames (`type: "tool"`) also arrive here, carrying the
             // whole tool result — up to hundreds of KB. Their content belongs to the
             // outputs panel (via `values`), not to an activity line.
-            return Vec::new();
+            _ => return Vec::new(),
         }
 
         // **A model call the user never asked for.** When a conversation grows long, the
@@ -4054,6 +4072,37 @@ mod tests {
             .to_string(),
         };
         assert_eq!(tokens(&decode(&answer)), "Late blight");
+    }
+
+    #[test]
+    fn a_whole_assistant_message_reaches_the_chat_once() {
+        let mut decoder = TurnDecoder::default();
+        // What `ModelCallLimitMiddleware` writes when it ends a run: one whole message.
+        let limit = SseEvent {
+            name: "messages".into(),
+            data: json!([
+                {"type": "ai", "id": "m9", "content": "Model call limits exceeded: run limit (60/60)"},
+                {"langgraph_node": "ModelCallLimitMiddleware.before_model"}
+            ])
+            .to_string(),
+        };
+        assert_eq!(
+            tokens(&decoder.push(&limit)),
+            "Model call limits exceeded: run limit (60/60)"
+        );
+
+        // A message already streamed as chunks is not repeated when it arrives whole.
+        let chunk = SseEvent {
+            name: "messages".into(),
+            data: json!([{"type": "AIMessageChunk", "id": "m1", "content": "Late blight"}, {}])
+                .to_string(),
+        };
+        let whole = SseEvent {
+            name: "messages".into(),
+            data: json!([{"type": "ai", "id": "m1", "content": "Late blight"}, {}]).to_string(),
+        };
+        assert_eq!(tokens(&decoder.push(&chunk)), "Late blight");
+        assert!(decoder.push(&whole).is_empty());
     }
 
     fn tokens(events: &[TurnEvent]) -> String {
