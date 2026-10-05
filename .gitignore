@@ -2,9 +2,10 @@
 **/*.rs.bk
 Cargo.lock.orig
 
-# Local sidecar / env
+# Local sidecar / env / venv
 .env
 .env.local
+.venv
 
 # OS / editor
 .DS_Store
