@@ -18,6 +18,7 @@ Advisory only: this middleware never executes a subagent. See
 :mod:`backend.project` for the (pure) derivation logic.
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -76,6 +77,9 @@ def _artifact_update(project: ProjectArtifactPayload) -> dict[str, Any]:
             "project": project,
         }
     }
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProjectSpineMiddleware(AgentMiddleware[ArtifactState, Any, Any]):
@@ -143,6 +147,17 @@ class ProjectSpineMiddleware(AgentMiddleware[ArtifactState, Any, Any]):
         assembled system prompt, leaving the large static coordinator prompt as a
         stable, cacheable prefix. No mission ⇒ pass through untouched.
         """
+        # What the coordinator's model is actually sent: one line per call. A turn that "repeated
+        # the last answer" sent exactly as many tokens as the call before the researcher's new
+        # message existed, and nothing on record could say which messages had gone out.
+        messages = request.messages or []
+        last = messages[-1] if messages else None
+        logger.info(
+            "coordinator model call: %d messages, last %s %s",
+            len(messages),
+            getattr(last, "type", None),
+            getattr(last, "id", None),
+        )
         runtime = request.runtime
         store = getattr(runtime, "store", None)
         if store is None:

@@ -35,7 +35,7 @@ from typing import Any
 
 from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.backends.protocol import ExecuteResponse, ReadResult, WriteResult
-from deepagents.backends.utils import _get_backend_read_file_type
+from deepagents.backends.utils import _get_file_type
 
 # Imported from the sandbox module rather than reimplemented, so the local path truncates
 # execute output exactly as the remote-sandbox path does — the cap protects the model's context
@@ -514,6 +514,9 @@ def _command_env() -> dict[str, str]:
     asta_token = os.getenv("ASTA_TOKEN")
     if asta_token:
         env["ASTA_TOKEN"] = asta_token
+    # Plots go to files. With WSLg a `DISPLAY` is set, so an interactive backend would let a
+    # stray `plt.show()` open a window and hold the command until it times out.
+    env["MPLBACKEND"] = "Agg"
     return env
 
 
@@ -606,6 +609,8 @@ class LocalWorkspaceBackend(LocalShellBackend):
         # routes that build a backend only to list or download files.
         self.pdf_attachments = True
         self.strict_attachments = False
+        #: Attachment kinds (`image`, `audio`, `video`) the model's profile rules out.
+        self.refused_kinds: frozenset[str] = frozenset()
 
     def adapt_to_model(self, model: Any) -> None:
         """Remember what `model` can take as an attachment, so `read` never sends what it cannot.
@@ -613,17 +618,26 @@ class LocalWorkspaceBackend(LocalShellBackend):
         - **PDFs:** Claude and Gemini read a PDF attachment natively — scans and figures
           included — so it is left to them. A model whose profile rules PDFs out gets pointed at
           `read_pdf`, which extracts the text.
-        - **Everything else that is not text or an image:** deepagents lets any non-PDF `file`
-          attachment through for an OpenAI-class model whatever its profile says, and the Chat
-          Completions API (every OpenRouter model) then refuses the whole request with a 400 — a
-          `.pptx`, a `.mkv` — and the file stays in the history, failing every later turn too. For
-          those models such files are reported as unsupported instead.
+        - **Everything else that is not text or an image:** deepagents sends any non-PDF `file`
+          attachment as-is, and the Chat Completions API (every OpenRouter model) then refuses the
+          whole request with a 400 — a `.pptx`, a `.mkv` — and the file stays in the history,
+          failing every later turn too. For OpenAI-class models such files are reported as
+          unsupported instead.
+        - **Images, audio, video the profile rules out** (`backend.models.UNSUPPORTED_ATTACHMENTS`):
+          deepagents 0.6 does not read the profile at all, so this is the only check.
         """
         profile = getattr(model, "profile", None)
         profile = profile if isinstance(profile, dict) else {}
         self.pdf_attachments = (
             profile.get("pdf_tool_message") is not False and profile.get("pdf_inputs") is not False
         )
+        refused = set()
+        if profile.get("image_tool_message") is False or profile.get("image_inputs") is False:
+            refused.add("image")
+        for kind in ("audio", "video"):
+            if profile.get(f"{kind}_inputs") is False:
+                refused.add(kind)
+        self.refused_kinds = frozenset(refused)
         try:
             from langchain_openai import ChatOpenAI
         except ImportError:
@@ -684,6 +698,11 @@ class LocalWorkspaceBackend(LocalShellBackend):
         is left alone; only one that is missing on the host *and* present under the
         workspace is redirected, which is exactly the `./x` → `/x` rewrite.
         """
+        # `.`, `./` and `` all arrive as `/`. Listing or searching the Linux root is never what
+        # the model meant — it listed `/bin`, `/etc` and browsed `~/.cache` instead of the
+        # conversation's files — and a `grep` there walks all of `/mnt/c`.
+        if isinstance(key, str) and key.strip() in ("", "/", "."):
+            return self._work_dir
         resolved = super()._resolve_path(key)
         if isinstance(key, str) and key.startswith("/") and not resolved.exists():
             local = self._work_dir / key.lstrip("/")
@@ -745,11 +764,16 @@ class LocalWorkspaceBackend(LocalShellBackend):
                         "PdfReader(sys.argv[1]).pages))\" '<path>'"
                     )
                 )
-            if (
-                self.strict_attachments
-                and suffix != ".pdf"
-                and _get_backend_read_file_type(file_path) not in ("text", "image")
-            ):
+            kind = _get_file_type(file_path)
+            if kind in self.refused_kinds:
+                return ReadResult(
+                    error=(
+                        f"'{file_path}' is {'an' if kind == 'image' else 'a'} {kind} file, which "
+                        "this model cannot receive. Tell the user this file format is not "
+                        "supported with the current model."
+                    )
+                )
+            if self.strict_attachments and suffix != ".pdf" and kind not in ("text", "image"):
                 hint = " Ask them to export it as a PDF." if suffix in (".ppt", ".pptx") else ""
                 return ReadResult(
                     error=(

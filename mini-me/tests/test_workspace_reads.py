@@ -83,3 +83,26 @@ def test_a_real_absolute_path_keeps_only_its_name(tmp_path, monkeypatch):
     assert not result.error, result.error
     assert (tmp_path / "thread-f" / "out.csv").read_text() == "a,b"
     assert not elsewhere.exists(), "a write never lands outside the workspace"
+
+
+def test_listing_dot_lists_the_conversation_folder_not_the_linux_root(tmp_path, monkeypatch):
+    """`ls .` arrives as `ls /`; it listed `/bin`, `/etc` and the model went browsing `~/.cache`."""
+    backend = _backend(tmp_path, monkeypatch, "thread-g")
+    (tmp_path / "thread-g" / "grades.csv").write_text("a,b\n")
+
+    result = backend.ls(validate_path("."))
+
+    assert not result.error, result.error
+    names = [Path(entry["path"]).name for entry in result.entries]
+    assert names == ["grades.csv"], names
+
+
+def test_a_kind_of_file_the_model_cannot_take_is_reported_not_attached(tmp_path, monkeypatch):
+    """deepagents 0.6 attaches audio, video and images whatever the model is; the profile decides here."""
+    backend = _backend(tmp_path, monkeypatch, "thread-h")
+    (tmp_path / "thread-h" / "interview.mp3").write_bytes(b"ID3")
+    backend.refused_kinds = frozenset({"audio"})  # what `adapt_to_model` sets from the profile
+
+    result = backend.read(validate_path("./interview.mp3"))
+
+    assert result.error and "cannot receive" in result.error

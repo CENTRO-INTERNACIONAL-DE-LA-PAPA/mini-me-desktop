@@ -110,15 +110,14 @@ def build_chat_model(spec: str, key_record: dict[str, Any] | None):
     return model
 
 
-#: Attachments each provider cannot take, as `ModelProfile` fields deepagents reads.
+#: Attachments each provider cannot take, as `ModelProfile` fields.
 #:
 #: **An unsupported file must be reported, never crash the run.** deepagents' `read_file` hands
-#: images, audio, video and PDFs to the model as attachments, and before every model call it swaps
-#: each one the profile rules out for a note — *"[read_file: x was not attached because this model
-#: does not support … content]"* — across the whole history, so a conversation that already holds
-#: one recovers too. But a field the profile does not mention counts as supported, and most models
-#: here have no profile at all (every OpenRouter id). A provider then refuses the request with a
-#: 400 and the run ends; the file stays in the history, so every later message fails the same way.
+#: images, audio, video and PDFs to the model as attachments, and the pinned deepagents (0.6) does
+#: not consult the profile. Most models here have no profile at all (every OpenRouter id), so a
+#: provider would refuse the request with a 400 and the run would end; the file stays in the
+#: history, so every later message fails the same way. `LocalWorkspaceBackend.adapt_to_model` reads
+#: these fields and `read` reports such a file as unsupported instead of attaching it.
 #:
 #: Through OpenRouter that is `400 Invalid value: 'file'. Supported values are: 'text', 'refusal',
 #: 'image_url', and 'input_audio'` for a PDF. Google takes all of these, so it is left alone.
