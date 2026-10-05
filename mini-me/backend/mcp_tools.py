@@ -1,8 +1,8 @@
-"""Hosted MCP servers: connection config, caching, resilience, and loaders.
+"""MCP servers: connection config, caching, resilience, and loaders.
 
 Mini-Me reaches external knowledge through hosted MCP servers (AGROVOC, Crop
-Ontology, Asta, the CIP Dataverse). This module owns their connection configs,
-process-wide adapters whose FastMCP caches honor each server's discovery TTL,
+Ontology, Asta) and the bundled CIP Dataverse stdio server. This module owns
+their connection configs, process-wide adapters whose FastMCP caches honor each server's discovery TTL,
 the truncation + save-to-sandbox logic that keeps large MCP payloads from
 poisoning agent state, and the ``get_*_mcp_tools`` loaders the subagents
 consume. Failed discovery is memoized for this process so an unavailable
@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Any, Sequence
 
 from fastmcp import Client
-from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
 from langchain_core._api import suppress_langchain_beta_warning
 
 with suppress_langchain_beta_warning():
@@ -55,12 +55,9 @@ MCP_SERVER_CONFIGS: dict[str, dict[str, Any]] = {
         },
     },
     "dataverse": {
-        "url": "https://dataverse-cip.fastmcp.app/mcp",
-        # Horizon Authentication is on for this deployment, and it must stay on: the server
-        # exposes six writing tools, and MCP calls do not pass through the `execute` approval
-        # gate. `headers_env` cannot serve here — the deployment offers no `client_credentials`
-        # grant, so no static key exists to put in one. See `backend/dataverse_auth.py`.
-        "oauth": True,
+        "transport": "stdio",
+
+        "init_timeout": 30,
     },
 }
 
@@ -118,6 +115,10 @@ def _normalize_mcp_server_names(server_names: Sequence[str]) -> tuple[str, ...]:
 
 def _resolve_mcp_server_config(server_name: str) -> dict[str, Any]:
     config = dict(MCP_SERVER_CONFIGS[server_name])
+    if server_name == "dataverse" and config.get("transport") == "stdio":
+        from backend.dataverse_local import server_config
+
+        config.update(server_config())
     header_envs = config.pop("headers_env", None)
     if not header_envs:
         return config
@@ -144,13 +145,10 @@ def _resolve_mcp_server_config(server_name: str) -> dict[str, Any]:
 def _get_or_create_mcp_client(
     server_names: Sequence[str], auth: Any | None = None
 ) -> MCPAdapter:
-    """Build (or reuse) the one adapter for this deployment.
+    """Build (or reuse) one adapter per server.
 
-    `auth` is **passed in rather than decided here**. Choosing it means reading the token store,
-    and this runs on the event loop during a graph build, where langgraph's `blockbuster` guard
-    turns filesystem access into a raised `BlockingError`. Deciding it here is what reported
-    Dataverse as unavailable on every launch whether or not the researcher had signed in — the
-    reasoning is in `dataverse_auth.auth_for_runtime`.
+    Local stdio configuration touches the filesystem, so its caller runs this factory on
+    a worker thread. OAuth, if configured for a hosted server, is resolved separately.
     """
     bundle = _normalize_mcp_server_names(server_names)
     if len(bundle) != 1:
@@ -161,19 +159,31 @@ def _get_or_create_mcp_client(
         server_name = bundle[0]
         config = _resolve_mcp_server_config(server_name)
         config.pop("oauth", None)
-        transport = StreamableHttpTransport(
-            config["url"],
-            headers=config.get("headers"),
-            auth=auth,
-        )
-        # `mode="auto"` negotiates the modern stateless protocol and falls back for a legacy
-        # deployment. The response cache honors the server's discovery TTL; keeping the adapter
+        if config.get("transport") == "stdio":
+            transport = StdioTransport(
+                command=config["command"],
+                args=config["args"],
+                cwd=config["cwd"],
+                env=config["env"],
+                # Each adapter operation owns its child process. No idle child survives
+                # a closed session; saved search files remain available to the next call.
+                keep_alive=False,
+            )
+        else:
+            transport = StreamableHttpTransport(
+                config["url"],
+                headers=config.get("headers"),
+                auth=auth,
+            )
+        # All bundled and hosted servers use FastMCP's protocol negotiation.
+        # The response cache honors the server's discovery TTL; keeping the adapter
         # process-wide means repeated graph factories share that cache without crossing users in
         # today's one-user desktop process. Key this cache by account when WorkOS lands.
         client = Client(
             transport,
             name=MCP_SERVER_LABELS.get(server_name, server_name),
-            mode="auto",
+            mode=config.get("mode", "auto"),
+            init_timeout=config.get("init_timeout"),
             cache=True,
         )
         _mcp_clients[bundle] = MCPAdapter(client)
@@ -586,12 +596,15 @@ async def get_mcp_tools(server_names: Sequence[str]) -> list[Any]:
                 from backend.dataverse_auth import auth_for_runtime
 
                 auth = await auth_for_runtime()
-            adapter = _get_or_create_mcp_client(bundle, auth)
+            if MCP_SERVER_CONFIGS[bundle[0]].get("transport") == "stdio":
+                adapter = await asyncio.to_thread(_get_or_create_mcp_client, bundle, auth)
+            else:
+                adapter = _get_or_create_mcp_client(bundle, auth)
             loaded = await adapter.list_tools(cache_mode="use")
             if not loaded:
                 raise ValueError("MCP server returned no tools")
             resilient = _make_mcp_tools_resilient(loaded)
-        except Exception as error:  # noqa: BLE001 — a hosted service is optional
+        except Exception as error:  # noqa: BLE001 — MCP services are optional
             # Cache the empty result for this process. Without it every read-only thread-state
             # request would immediately hammer the same unavailable deployment again. A restart
             # performs a fresh handshake; the future account flow can invalidate this cache after
@@ -624,6 +637,7 @@ async def get_academic_research_mcp_tools() -> list[Any]:
 
 
 async def get_dataverse_search_mcp_tools() -> list[Any]:
+    """Expose only search/read tools from the local server, never its curation tools."""
     allowed_names = {
         "SearchCIPDataverse",
         "read_search_results",

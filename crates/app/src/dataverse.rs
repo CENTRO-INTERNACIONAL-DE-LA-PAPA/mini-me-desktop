@@ -2,18 +2,18 @@
 //!
 //! # Why this is not the MCP's job
 //!
-//! The Dataverse MCP has a download tool and it is useless to us. Probed against the live server
-//! (docs §223):
+//! The Dataverse MCP has a download tool, but it writes into server-managed directories.
+//! Probed against the former hosted server (docs §223):
 //!
 //! ```text
 //! download_dataset_files_by_doi(doi, output_dir, extract_zip)
 //!   output_dir: "Directory to save downloaded files. Defaults to a server-managed directory."
 //! ```
 //!
-//! That directory is on `dataverse-cip.fastmcp.app`, so the tool downloads a dataset onto somebody
-//! else's machine and reports success. Turning it on would give the subagent a way to say it
-//! fetched a file nobody can open. The skill's own reference already said as much — *"those files
-//! do not automatically appear inside the sandbox"* — which on the web was the end of the matter.
+//! On the former hosted MCP, that directory was on `dataverse-cip.fastmcp.app`; on the bundled
+//! stdio server it is local, but still outside the conversation workspace by default.
+//! The agent therefore retains its read-only MCP scope. Downloads stay here so files reach the
+//! thread's folder and the restricted-file checks below cannot be bypassed.
 //!
 //! On the desktop it is not, because of one fact that took a while to notice: **the thread's
 //! folder is the sandbox's working directory**. `crate::workspace` puts it on the Windows side at
@@ -153,7 +153,10 @@ impl Access {
     /// Ask the server which files this dataset has and whether they are restricted.
     pub async fn of(client: &reqwest::Client, persistent_id: &str) -> Result<Access> {
         let response = client
-            .get(format!("{}/api/datasets/:persistentId/versions/:latest/files", instance()))
+            .get(format!(
+                "{}/api/datasets/:persistentId/versions/:latest/files",
+                instance()
+            ))
             .query(&[("persistentId", persistent_id)])
             .send()
             .await
@@ -234,10 +237,7 @@ pub fn archive_name(persistent_id: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     let stem = stem.trim_matches('-').to_string();
-    format!(
-        "{}.zip",
-        if stem.is_empty() { "dataset" } else { &stem }
-    )
+    format!("{}.zip", if stem.is_empty() { "dataset" } else { &stem })
 }
 
 /// Fetch the dataset into `folder`, returning where it landed.
@@ -263,18 +263,19 @@ pub async fn download(
         .with_context(|| format!("downloading {persistent_id}"))?;
     let status = response.status();
     if !status.is_success() {
-        bail!("{} answered {status} downloading {persistent_id}", instance());
+        bail!(
+            "{} answered {status} downloading {persistent_id}",
+            instance()
+        );
     }
     let bytes = response
         .bytes()
         .await
         .with_context(|| format!("reading {persistent_id}"))?;
 
-    std::fs::create_dir_all(folder)
-        .with_context(|| format!("creating {}", folder.display()))?;
+    std::fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
     let target = folder.join(archive_name(persistent_id));
-    std::fs::write(&target, &bytes)
-        .with_context(|| format!("writing {}", target.display()))?;
+    std::fs::write(&target, &bytes).with_context(|| format!("writing {}", target.display()))?;
     Ok(target)
 }
 
@@ -344,14 +345,12 @@ mod tests {
     fn restriction_is_reported_ahead_of_size() {
         // A dataset that is both: the researcher can act on "ask for access", not on "too big".
         let access = Access {
-            files: vec![
-                DatasetFile {
-                    filename: "huge.tab".into(),
-                    size: SIZE_LIMIT + 1,
-                    restricted: true,
-                    ..Default::default()
-                },
-            ],
+            files: vec![DatasetFile {
+                filename: "huge.tab".into(),
+                size: SIZE_LIMIT + 1,
+                restricted: true,
+                ..Default::default()
+            }],
         };
         assert!(matches!(access.refusal(), Some(Refusal::Restricted { .. })));
     }
@@ -377,9 +376,15 @@ mod tests {
 
     #[test]
     fn the_archive_is_named_after_the_identifier_not_the_title() {
-        assert_eq!(archive_name("doi:10.21223/P3/0F9T62"), "10-21223-P3-0F9T62.zip");
+        assert_eq!(
+            archive_name("doi:10.21223/P3/0F9T62"),
+            "10-21223-P3-0F9T62.zip"
+        );
         // A title-shaped id would still produce something a filesystem accepts.
-        assert_eq!(archive_name("doi:10.5072/FK2/ABC DEF"), "10-5072-FK2-ABC-DEF.zip");
+        assert_eq!(
+            archive_name("doi:10.5072/FK2/ABC DEF"),
+            "10-5072-FK2-ABC-DEF.zip"
+        );
         assert_eq!(archive_name(""), "dataset.zip");
     }
 
@@ -389,7 +394,10 @@ mod tests {
         // wrong, but at least refusing. Anything that is not JSON is an error outright.
         assert!(parse_files("<html>gateway timeout</html>").is_err());
         // Valid JSON with no `data`/`files` is an empty list, which `Empty` then refuses.
-        assert_eq!(parse_files(r#"{"status":"ERROR"}"#).expect("parses").len(), 0);
+        assert_eq!(
+            parse_files(r#"{"status":"ERROR"}"#).expect("parses").len(),
+            0
+        );
     }
 
     #[test]

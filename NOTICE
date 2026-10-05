@@ -22,3 +22,11 @@ Specifically:
 You may obtain a copy of the Apache License, Version 2.0 at:
 
     http://www.apache.org/licenses/LICENSE-2.0
+
+This product also includes the Dataverse MCP server and dataset templates from
+AskPapa, licensed under the Apache License, Version 2.0.
+
+* Source: AskPapa/mcp_server_stdio/dataverse_server.py and its dataset JSON templates.
+* Included in mini-me/backend/dataverse_mcp/, with a copy of the upstream LICENSE.
+* Modified for the desktop's FastMCP 4 runtime and OS-specific temporary paths.
+* The desktop agent exposes only the three read-only search/inspection tools.

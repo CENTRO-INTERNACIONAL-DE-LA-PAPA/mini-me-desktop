@@ -54,9 +54,9 @@ rather than assumed, so a server that moves its directory is followed rather tha
 
 # The results are kept where the researcher can open them
 
-That file lives on the MCP host — `/tmp/mcp/json_files/` on a machine at
-`dataverse-cip.fastmcp.app`, which is nobody's workspace. *"I want the user to have it."* So what
-comes back from the read is written into the sandbox as `dataverse_search.json`, where
+That file lives in the MCP server's managed directory (now on this machine, formerly on
+`dataverse-cip.fastmcp.app`), not in the conversation workspace. What comes back from the read
+is still written into the sandbox as `dataverse_search.json`, where
 `FileSyncMiddleware` surfaces it in Outputs and `middleware/claims.py` can check the recommended
 `persistent_id`s against it. Until this, that check was reading a path that never existed.
 """
@@ -262,8 +262,8 @@ class SearchResultsFile(AgentMiddleware):
 
     * the search is told where to write (`output_filename`);
     * the read is told where to look (`file_path`), taken from what the search answered;
-    * what the read returns is saved into the workspace, because the file itself is on the MCP
-      host and the researcher has no way to reach it there.
+    * what the read returns is saved into the workspace, rather than left in the MCP server's
+      managed temporary directory.
 
     The copy is written on the async path only. The server runs the graph there, and the sandbox
     write is a coroutine; the sync path still fixes the arguments, so a synchronous run is

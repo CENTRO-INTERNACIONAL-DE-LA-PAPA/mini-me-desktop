@@ -152,8 +152,9 @@ without ever contacting GitHub.
 
 ## MCP integrations
 
-Ask the Data loads four hosted Model Context Protocol servers over HTTP. LangChain's first-party
-MCP adapter and FastMCP 4 negotiate the stateless 2026 protocol with a legacy fallback per server;
+Ask the Data loads three hosted Model Context Protocol servers over HTTP and its bundled
+Dataverse server over stdio. LangChain's first-party MCP adapter and FastMCP 4 negotiate the
+stateless 2026 protocol with a legacy fallback per server;
 tool discovery follows each server's cache TTL. An unavailable deployment removes only its own
 capability, and oversized results are saved into the active conversation workspace rather than
 filling the model context. Modern MCP form and URL elicitation pauses are shown to the researcher
@@ -162,9 +163,37 @@ and may be accepted, declined, or cancelled before the tool continues.
 | MCP server | Endpoint | Used by | Purpose and exposed scope |
 |---|---|---|---|
 | **Asta** | `https://asta-tools.allen.ai/mcp/v1` | `academic_researcher` | Scientific literature search and passage retrieval. Authenticated with an Asta API key. |
-| **CIP Dataverse** | `https://dataverse-cip.fastmcp.app/mcp` | `dataverse_explorer` | Dataset search, complete search-result reading, and dataset-file listing. The agent is restricted to `SearchCIPDataverse`, `read_search_results`, and `list_dataset_files`; it does not receive curation tools. |
+| **CIP Dataverse** | Bundled `backend/dataverse_mcp/server.py` (stdio) | `dataverse_explorer` | Dataset search, complete search-result reading, and dataset-file listing. The agent is restricted to `SearchCIPDataverse`, `read_search_results`, and `list_dataset_files`; it does not receive curation tools. |
 | **AGROVOC** | `https://agrovoc.fastmcp.app/mcp` | `data_cleaning` | Agricultural vocabulary lookup and terminology normalization. |
 | **Crop Ontology** | `https://CropOntology.fastmcp.app/mcp` | `data_cleaning` | Crop trait, genotype, and phenotype terminology and mappings. |
+
+### Bundled Dataverse MCP
+
+The complete Dataverse MCP and its four JSON templates are included in
+`mini-me/backend/dataverse_mcp/`, adapted from AskPapa under Apache-2.0 for FastMCP 4.
+**No external checkout, separate virtual environment, or hosted MCP login is required.**
+It runs as a stdio child process using the same Python interpreter as the backend. Its
+dependencies are declared in `mini-me/pyproject.toml` and locked in `mini-me/uv.lock`, so the
+normal desktop setup (`uv sync --extra dev`) installs everything needed. Both desktop bundles
+and Python wheels include the server, templates, and license.
+
+Public dataset search, reading saved search results, and listing files of public datasets do
+**not** require a Dataverse API key. `DATAVERSE_API_KEY` is optional for privileged access.
+The agent receives only the three read-only tools listed above, even though the bundled server
+contains curation tools. Desktop dataset downloads retain their existing approval/access checks.
+
+Desktop Setup checks the bundled script and interpreter; MCP discovery reports runtime health.
+Missing files or required tools disable only Dataverse. After repairing the backend, restart it
+to retry discovery. Results are stored in the OS temporary directory under `mcp/json_files`
+(`/tmp/mcp/json_files` on Linux) and copied into the conversation workspace by the existing
+middleware. Each operation closes its child process; result files persist between operations.
+The local server still contacts CIP Dataverse over the network for searches and metadata.
+
+Server settings (`DATAVERSE_API_KEY`, `DATAVERSE_BASE_URL`, `ENV_FILE`, `MCP_JSON_DIR`,
+`MCP_DOWNLOAD_DIR`) and system proxy variables are forwarded from the backend environment.
+`MINIME_DATAVERSE_SERVER` and `MINIME_DATAVERSE_PYTHON` remain optional **developer overrides**;
+leave them unset to use the bundled server. Remove any overrides pointing to AskPapa from the
+previous integration. Paths are passed as subprocess arguments, not shell commands.
 
 The Asta-powered specialists also use the authenticated `asta` CLI for capabilities that are not
 exposed through those MCP tools:
@@ -182,7 +211,7 @@ exposed through those MCP tools:
 |---|---|---|
 | **LLM providers** | Reasoning and language generation. OpenAI, Anthropic, Google, Mistral, and custom OpenAI-compatible gateways are supported. | When a conversation or specialist run is submitted. The user supplies the provider credentials. |
 | **Asta / Allen Institute for AI** | Literature tools, Semantic Scholar records, PDF OCR, document embeddings, theory generation, DataVoyager, and AutoDiscovery. | Only when an Asta-backed specialist or command is used. Some operations consume Asta credits and require approval. |
-| **CIP Dataverse MCP** | Searches CIP's dataset catalogue and retrieves dataset/file metadata. | When the Dataverse Explorer runs. |
+| **CIP Dataverse (via local MCP)** | The local server searches CIP's dataset catalogue and retrieves dataset/file metadata over the network. | When the Dataverse Explorer runs. |
 | **AGROVOC and Crop Ontology MCPs** | Resolve and normalize agricultural and crop terminology. | When the Data Cleaner requests ontology assistance. |
 | **Semantic Scholar and arXiv** | Stable paper records and open-access PDF locations. These are normally reached through Asta; the PDF Librarian can download an identified open-access PDF URL. | When literature is resolved or an open-access paper is explicitly fetched. Paywalled material is not bypassed. |
 | **Crossref** | Checks whether a DOI resolves to the paper named by a citation and can search for a likely registered DOI. | The desktop sends a DOI, or citation text when repairing a missing/mismatched identifier. It does not send the research question or uploaded files. |

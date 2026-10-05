@@ -381,6 +381,58 @@ fn backend_build(config: &BackendConfig) -> Option<Check> {
     ))
 }
 
+/// Ask the backend for local Dataverse paths, without contacting Dataverse or starting a login.
+fn dataverse_probe_argv(config: &BackendConfig) -> Vec<String> {
+    if config.wsl.is_some() {
+        return config.shell_argv(&format!(
+            "cd {} && .venv/bin/python -m backend.dataverse_local",
+            quote_path(&config.backend_dir())
+        ));
+    }
+    let python = if cfg!(windows) {
+        ".venv/Scripts/python.exe"
+    } else {
+        ".venv/bin/python"
+    };
+    let root = serde_json::to_string(&config.project_dir.to_string_lossy()).unwrap();
+    vec![
+        config
+            .project_dir
+            .join(python)
+            .to_string_lossy()
+            .into_owned(),
+        "-c".into(),
+        format!(
+            "import sys; sys.path.insert(0, {root}); import json; \
+             from backend.dataverse_local import setup_status; print(json.dumps(setup_status()))"
+        ),
+    ]
+}
+
+fn dataverse_check(payload: &str) -> Option<Check> {
+    let status: serde_json::Value = serde_json::from_str(payload.trim()).ok()?;
+    let ready = status.get("ready")?.as_bool()?;
+    Some(Check {
+        id: "dataverse",
+        label: "CIP Dataverse (local MCP)",
+        state: if ready { State::Pass } else { State::Warn },
+        detail: status.get("detail")?.as_str()?.into(),
+        fixes: if ready {
+            vec![]
+        } else {
+            vec![Fix::Manual(
+                "Reinstall or update the bundled Mini-Me backend and run uv sync --extra dev, \
+                 then restart the backend. The Dataverse MCP is included with the app and uses \
+                 its Python environment; AskPapa is not required. Remove any stale \
+                 MINIME_DATAVERSE_SERVER or MINIME_DATAVERSE_PYTHON overrides from the backend's \
+                 .env. Public dataset search needs neither an API key nor a hosted MCP sign-in."
+                    .into(),
+            )]
+        },
+        optional: true,
+    })
+}
+
 /// Whether the backend's own interpreter can import a module.
 ///
 /// **The question Setup has to ask about the checkpointer, and did not.** It checked that
@@ -393,24 +445,6 @@ fn backend_build(config: &BackendConfig) -> Option<Check> {
 /// Windows-native has no `bash` to ask, so it runs the interpreter directly. Both paths run the
 /// **backend's** Python — a module importable in some other interpreter answers a question nobody
 /// asked.
-/// Whether a Dataverse sign-in is stored where the backend would look for it.
-///
-/// `None` means the question could not be asked — an older backend without the module, or a
-/// checkout that will not run — and is deliberately distinct from "signed out", which is a
-/// thing a researcher can fix by pressing a button.
-fn dataverse_sign_in(config: &BackendConfig) -> Option<bool> {
-    let script = format!(
-        "cd {} && .venv/bin/python -c \
-         'from backend.dataverse_auth import signed_in; print(int(signed_in()))'",
-        quote_path(&config.backend_dir())
-    );
-    let probed = probe(&config.shell_argv(&script));
-    if !probed.ok {
-        return None;
-    }
-    Some(probed.stdout.trim().ends_with('1'))
-}
-
 fn imports(config: &BackendConfig, module: &str) -> bool {
     let python = if config.wsl.is_some() || !cfg!(windows) {
         ".venv/bin/python"
@@ -562,7 +596,10 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             "runtime",
             "Shell",
             State::Fail,
-            format!("this machine can't run the backend's commands — {}", runtime.message()),
+            format!(
+                "this machine can't run the backend's commands — {}",
+                runtime.message()
+            ),
             vec![Fix::Manual(
                 "The backend needs a POSIX shell. On Windows that means WSL: unset \
                  MINIME_BACKEND_WSL to use it (docs §21)."
@@ -897,49 +934,14 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         checks.push(Check::skip("asta", "Asta CLI", RUNTIME_FIRST).optional());
     }
 
-    // --------------------------------------------------- 5b. the Dataverse sign-in
-    //
-    // **Its own row because its failure is silent.** CIP's Dataverse deployment has Horizon
-    // Authentication switched on, so it answers every unauthenticated call with 401. The agent
-    // survives that — one unreachable service no longer takes the graph down — which is exactly
-    // why it needs saying here: without a row, "Dataverse never finds anything" looks like a
-    // broken tool rather than a sign-in nobody was asked for.
-    //
-    // Asked of the token on disk rather than of the network. Setup already runs several probes
-    // and this one would be a request to a hosted service on every re-check; a stale token still
-    // reports as available in `/mcp-status`, and the button below is present either way — the
-    // same reasoning that keeps Asta's "Sign in again" on a green row.
+    // --------------------------------------------------- 5b. the local Dataverse MCP
+    // This checks paths only. The graph's MCP handshake reports actual runtime availability.
     if runtime_ok {
-        let sign_in = Fix::Run {
-            label: "Sign in to CIP Dataverse",
-            argv: config.shell_argv(&format!(
-                "cd {} && .venv/bin/python -m backend.dataverse_auth login",
-                quote_path(&config.backend_dir())
-            )),
-            note: "opens a browser; sign in with the CIP account that belongs to cipotato",
-        };
-        match dataverse_sign_in(config) {
-            Some(true) => checks.push(Check {
-                id: "dataverse",
-                label: "CIP Dataverse",
-                state: State::Pass,
-                detail: "signed in — you can search CIP's datasets".into(),
-                fixes: vec![sign_in],
-                optional: true,
-            }),
-            Some(false) => checks.push(
-                Check::failing(
-                    "dataverse",
-                    "CIP Dataverse",
-                    State::Warn,
-                    "not signed in — dataset search won't find anything until you do",
-                    vec![sign_in],
-                )
-                .optional(),
-            ),
-            // The backend predates this module. Not a failure of anything, and inventing a
-            // warning for it would send someone looking for a problem they do not have.
-            None => {}
+        let probed = probe(&dataverse_probe_argv(config));
+        if probed.ok {
+            if let Some(check) = dataverse_check(&probed.stdout) {
+                checks.push(check);
+            }
         }
     }
 
@@ -1057,9 +1059,7 @@ fn looks_utf16(bytes: &[u8]) -> bool {
 
 fn find_newline(bytes: &[u8], wide: bool) -> Option<usize> {
     if wide {
-        bytes
-            .windows(2)
-            .position(|pair| pair == [0x0a, 0x00])
+        bytes.windows(2).position(|pair| pair == [0x0a, 0x00])
     } else {
         bytes.iter().position(|byte| *byte == 0x0a)
     }
@@ -1135,7 +1135,9 @@ fn elevated(argv: &[&str]) -> Vec<String> {
     if !cfg!(windows) {
         return argv.iter().map(|part| part.to_string()).collect();
     }
-    let (program, rest) = argv.split_first().expect("elevated command needs a program");
+    let (program, rest) = argv
+        .split_first()
+        .expect("elevated command needs a program");
     let args = rest.join(" ");
     // Single-quoted for PowerShell, doubling any quote inside — nothing here contains one
     // today, and a future path must not be able to break out of the string.
@@ -1497,21 +1499,41 @@ mod tests {
             State::Fail,
             "an out-of-date backend is missing the credit gate, which is not optional"
         );
-        assert!(unstamped.detail.contains("ccbe00ee1741"), "{}", unstamped.detail);
-        assert_eq!(unstamped.fixes.len(), 1, "and it can be fixed from the pane");
+        assert!(
+            unstamped.detail.contains("ccbe00ee1741"),
+            "{}",
+            unstamped.detail
+        );
+        assert_eq!(
+            unstamped.fixes.len(),
+            1,
+            "and it can be fixed from the pane"
+        );
 
         // A different build.
         std::fs::write(installed.join(BACKEND_STAMP), "0000deadbeef").expect("stamp");
         let stale = backend_build(&config).expect("a bundled stamp exists now");
         assert_eq!(stale.state, State::Fail);
-        assert!(stale.detail.contains("0000deadbeef"), "names what is installed: {}", stale.detail);
-        assert!(stale.detail.contains("ccbe00ee1741"), "and what it should be: {}", stale.detail);
+        assert!(
+            stale.detail.contains("0000deadbeef"),
+            "names what is installed: {}",
+            stale.detail
+        );
+        assert!(
+            stale.detail.contains("ccbe00ee1741"),
+            "and what it should be: {}",
+            stale.detail
+        );
 
         // The same build says so, and offers nothing — a pane full of actions nobody needs is
         // how the real one stops being read.
         std::fs::write(installed.join(BACKEND_STAMP), "  ccbe00ee1741  \n").expect("stamp");
         let current = backend_build(&config).expect("a bundled stamp exists now");
-        assert_eq!(current.state, State::Pass, "whitespace is not a different build");
+        assert_eq!(
+            current.state,
+            State::Pass,
+            "whitespace is not a different build"
+        );
         assert!(current.fixes.is_empty());
 
         // SAFETY: same lock.
@@ -1680,32 +1702,10 @@ mod tests {
 │ Auto-Refresh         │ ✅ Enabled                          │\n\
 └──────────────────────┴─────────────────────────────────────┘";
 
-    /// The Dataverse sign-in row and the module it drives agree about their names.
-    ///
-    /// Two commands cross into Python here — `backend.dataverse_auth login` behind the button,
-    /// and a `signed_in()` call behind the row's state — and both fail the same way if a name
-    /// moves: the probe returns nothing, `dataverse_sign_in` reads that as "cannot ask", and the
-    /// row **disappears**. A researcher would see no Dataverse row at all and conclude the
-    /// feature was never there, which is the quietest possible failure.
-    ///
-    /// Read from the Python source rather than by running it: this has to hold on a machine with
-    /// no backend installed, which is most of the machines that run these tests.
     #[test]
-    fn the_dataverse_sign_in_row_names_something_python_actually_defines() {
-        const MODULE: &str = include_str!("../../../mini-me/backend/dataverse_auth.py");
-
-        // The two entry points the app reaches for, spelled as the app spells them.
-        assert!(
-            MODULE.contains("def signed_in("),
-            "the row's state comes from `signed_in()`"
-        );
-        assert!(
-            MODULE.contains("\"login\""),
-            "the button runs `-m backend.dataverse_auth login`"
-        );
-
-        // And the app really does ask for those, so this test cannot pass by describing a
-        // command nobody builds.
+    fn the_dataverse_row_checks_the_local_server_in_the_backends_runtime() {
+        const MODULE: &str = include_str!("../../../mini-me/backend/dataverse_local.py");
+        assert!(MODULE.contains("def setup_status("));
         let config = BackendConfig {
             wsl: Some(crate::backend::WslTarget {
                 distro: None,
@@ -1713,13 +1713,35 @@ mod tests {
             }),
             ..BackendConfig::default()
         };
-        let login = config.shell_argv(&format!(
-            "cd {} && .venv/bin/python -m backend.dataverse_auth login",
-            crate::backend::quote_path(&config.backend_dir())
-        ));
-        let script = login.last().expect("the bash -lc payload");
-        assert!(script.contains("backend.dataverse_auth login"), "{script}");
+        let argv = dataverse_probe_argv(&config);
+        let script = argv.last().expect("the bash -lc payload");
+        assert!(script.contains("backend.dataverse_local"), "{script}");
         assert!(script.contains(".venv/bin/python"), "{script}");
+        assert!(!script.contains("dataverse_auth"), "{script}");
+
+        let native = BackendConfig {
+            project_dir: std::path::PathBuf::from("/a/backend with spaces"),
+            wsl: None,
+            ..BackendConfig::default()
+        };
+        let argv = dataverse_probe_argv(&native);
+        assert!(argv[0].contains("backend with spaces"));
+        assert_eq!(argv[1], "-c");
+        assert!(argv[2].contains("setup_status()"));
+    }
+
+    #[test]
+    fn local_dataverse_setup_never_offers_a_hosted_sign_in() {
+        let ready = dataverse_check(r#"{"ready":true,"detail":"paths configured"}"#).unwrap();
+        assert_eq!(ready.state, State::Pass);
+        assert!(ready.fixes.is_empty());
+        let missing = dataverse_check(r#"{"ready":false,"detail":"script missing"}"#).unwrap();
+        assert_eq!(missing.state, State::Warn);
+        assert!(missing.optional);
+        assert!(
+            matches!(&missing.fixes[0], Fix::Manual(note) if note.contains("MINIME_DATAVERSE_SERVER"))
+        );
+        assert!(dataverse_check("not json").is_none());
     }
 
     #[test]
@@ -1857,7 +1879,10 @@ mod encoding_tests {
             // itself throw before anything ran, and a freshly written `.cmd` file got
             // refused as an unknown publisher once that was fixed.
             assert!(script.contains("-FilePath 'wsl.exe'"), "{script}");
-            assert!(script.contains("-ArgumentList '--install -d Ubuntu'"), "{script}");
+            assert!(
+                script.contains("-ArgumentList '--install -d Ubuntu'"),
+                "{script}"
+            );
             assert!(!script.contains("cmd.exe"), "{script}");
             assert!(!script.contains('<'), "{script}");
             assert!(!script.contains('>'), "{script}");
@@ -1913,7 +1938,10 @@ mod encoding_tests {
         )
         .expect("the command ran");
 
-        assert!(watcher.join().expect("watcher"), "the kill was not delivered");
+        assert!(
+            watcher.join().expect("watcher"),
+            "the kill was not delivered"
+        );
         assert!(!ok, "a stopped repair did not succeed");
         assert!(
             started.elapsed() < Duration::from_secs(20),
@@ -1921,7 +1949,10 @@ mod encoding_tests {
         );
         // Reaped, so the number is free for the next process on the machine and must not be
         // handed to anyone. This is the half that keeps a late click from killing a stranger.
-        assert!(!cancel.armed(), "the handle stayed armed after the child was reaped");
+        assert!(
+            !cancel.armed(),
+            "the handle stayed armed after the child was reaped"
+        );
         assert!(!cancel.stop());
     }
 

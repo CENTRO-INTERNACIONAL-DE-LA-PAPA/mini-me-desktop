@@ -1,4 +1,7 @@
-"""Signing in to the Horizon-protected Dataverse deployment, and what happens before you have.
+"""Legacy OAuth helpers for the former hosted Dataverse deployment.
+
+The default integration now uses local stdio; these tests explicitly configure the old hosted
+transport so retained OAuth helpers are tested independently of the desktop's default.
 
 The deployment answers unauthenticated calls with `401` and a `WWW-Authenticate: Bearer` header
 naming an OAuth resource. Its metadata offers only `authorization_code` and `refresh_token` — no
@@ -28,6 +31,13 @@ def state(tmp_path, monkeypatch):
     fixed for the life of the process); across tests in one interpreter it is a leak, and it
     silently pointed one test's store at another's directory.
     """
+    from backend import mcp_tools
+
+    monkeypatch.setitem(
+        mcp_tools.MCP_SERVER_CONFIGS,
+        "dataverse",
+        {"url": dataverse_auth.DATAVERSE_MCP_URL, "oauth": True},
+    )
     monkeypatch.setenv("MINIME_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(dataverse_auth, "_STATE_DIR", None)
     return tmp_path
