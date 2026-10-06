@@ -46,8 +46,10 @@ but you need a different Asta account for hypotheses. Ask your team lead.
 
 ### The Dataverse never finds any datasets
 
-You are probably not signed in to the CIP Dataverse. Open **Run setup checks** and click
-**Sign in to CIP Dataverse**.
+Open **Run setup checks** and look at the **CIP Dataverse** row. If it shows a warning, the
+search tool that comes with Mini-Me is missing or damaged: update or reinstall Mini-Me, then open
+it again. No sign-in is needed. If the row is fine, check your internet connection — the search
+still goes to CIP's Dataverse over the network.
 
 ### "Research service unavailable"
 

@@ -1,6 +1,7 @@
 """Bundled Dataverse behavior against mocked public API responses."""
 
 import asyncio
+import inspect
 import json
 from tempfile import gettempdir
 
@@ -83,3 +84,30 @@ def test_read_search_results_rejects_files_outside_managed_directories(tmp_path,
     outside.write_text("[]", encoding="utf-8")
     with pytest.raises(FileNotFoundError):
         asyncio.run(server.read_search_results(str(outside)))
+
+
+def test_search_cannot_choose_where_it_writes():
+    """Bundled, the server runs on the researcher's machine, outside the sandbox and approvals."""
+    assert "output_dir" not in inspect.signature(server.SearchCIPDataverse).parameters
+
+
+def test_every_dataverse_request_checks_certificates(tmp_path, monkeypatch):
+    """No unchecked TLS: a search result or API key must not be open to anyone on the network."""
+    source = server.Path(server.__file__).read_text(encoding="utf-8")
+    assert "verify=False" not in source
+
+    monkeypatch.setattr(server, "DEFAULT_JSON_DIR", tmp_path)
+    seen = []
+
+    def handle(request):
+        return httpx.Response(200, json={"status": "OK", "data": {"total_count": 0, "items": []}})
+
+    original = httpx.AsyncClient
+
+    def client(**kwargs):
+        seen.append(kwargs.get("verify"))
+        return original(transport=httpx.MockTransport(handle), **kwargs)
+
+    monkeypatch.setattr(server.httpx, "AsyncClient", client)
+    asyncio.run(server.SearchCIPDataverse(Context(), query="potato", output_filename="s.json"))
+    assert seen and all(verify is server.VERIFY_TLS for verify in seen)

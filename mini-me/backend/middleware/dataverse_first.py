@@ -382,8 +382,11 @@ class SearchResultsFile(AgentMiddleware):
             return request
 
         # `filename` is not an argument of either tool, and passing it is a hard error rather than
-        # a harmless extra — it is what the previous version of this file injected.
-        cleaned = {key: value for key, value in args.items() if key != "filename"}
+        # a harmless extra — it is what the previous version of this file injected. `output_dir`
+        # is no longer one either: the bundled server always writes to its managed directory,
+        # because it runs on the researcher's machine rather than a hosted one.
+        dropped = {"filename", "output_dir"}
+        cleaned = {key: value for key, value in args.items() if key not in dropped}
         if cleaned.get(argument) == wanted and cleaned == args:
             return request
         # Logged when it corrects something, so the line reads "the model got this wrong again"

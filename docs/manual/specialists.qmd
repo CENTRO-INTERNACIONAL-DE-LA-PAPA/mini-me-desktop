@@ -27,7 +27,8 @@ the team can do.
 ::: {.callout-note}
 Some specialists (Academic Researcher, PDF Librarian, Data Voyager, Hypothesis Generator and
 AutoDiscovery) use the **Asta** service, so you need to have signed in to Asta during
-setup. The Dataverse Explorer needs the **CIP Dataverse** sign-in.
+setup. The Dataverse Explorer needs **no sign-in**: it searches the public CIP Dataverse
+directly.
 :::
 
 ## Where the data comes from {#data-sources}

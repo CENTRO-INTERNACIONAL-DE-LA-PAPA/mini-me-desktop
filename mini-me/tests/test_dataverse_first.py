@@ -194,6 +194,16 @@ def test_a_filename_the_model_supplies_is_removed_rather_than_passed_on():
     assert args == {"file_path": "/tmp/mcp/json_files/dataverse_search.json"}
 
 
+def test_a_directory_the_model_supplies_is_removed_from_the_search():
+    """The bundled server writes only to its managed directory; it runs on the user's machine."""
+    args = _fixed(
+        SearchResultsFile(),
+        SEARCH_TOOL,
+        {"query": "potato", "output_dir": "/mnt/c/Users/someone/Desktop"},
+    )
+    assert args == {"query": "potato", "output_filename": FIXED_FILENAME}
+
+
 def test_the_read_looks_where_the_search_said_it_wrote():
     """Taken from the search's own answer, so a server that moves its directory is followed."""
     middleware = SearchResultsFile()

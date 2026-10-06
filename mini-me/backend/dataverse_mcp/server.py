@@ -60,6 +60,18 @@ DATASET_TEMPLATE_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Certificate checks stay on. Bundled, this server talks to Dataverse from the researcher's own
+# network (a corporate proxy, public Wi-Fi), where an unchecked connection lets anyone in the middle
+# substitute search results or read DATAVERSE_API_KEY from the headers. CIP Dataverse's certificate
+# validates with httpx's default bundle; a network that re-signs TLS can point SSL_CERT_FILE at its
+# CA, and DATAVERSE_VERIFY_TLS=false remains as an explicit, last-resort opt-out.
+VERIFY_TLS = os.environ.get("DATAVERSE_VERIFY_TLS", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
 # Known top-level Dataverse aliases on CIP Dataverse (used by list_dataverse_collections)
 KNOWN_DATAVERSE_ROOT_ALIASES: List[str] = ["cipdata", "dvn"]
 
@@ -980,12 +992,6 @@ async def SearchCIPDataverse(
     max_results: Annotated[
         Optional[int], Field(description="Maximum number of items to retrieve.")
     ] = None,
-    output_dir: Annotated[
-        Optional[str],
-        Field(
-            description="Directory to save the JSON file. Defaults to a server-managed directory."
-        ),
-    ] = None,
     content_type: Annotated[
         Optional[str],
         Field(
@@ -1005,7 +1011,11 @@ async def SearchCIPDataverse(
     complete = False
     partial_error: Optional[str] = None
 
-    output_folder_path = Path(output_dir) if output_dir else DEFAULT_JSON_DIR
+    # Always the managed directory. Bundled, this server runs on the researcher's own machine,
+    # outside the sandbox and the approval gate, so a model-chosen directory would let a search
+    # create folders and write anywhere the user can. It is also the only place
+    # `read_search_results` looks, so a file written elsewhere could not be read back.
+    output_folder_path = DEFAULT_JSON_DIR
     output_folder_path.mkdir(parents=True, exist_ok=True)
     safe_output_filename = _sanitize_output_filename(
         output_filename,
@@ -1018,7 +1028,7 @@ async def SearchCIPDataverse(
         progress=0, total=max_results or 100, message="Initializing search..."
     )
 
-    async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=20.0) as client:
         while True:
             page_num += 1
             params = {
@@ -1162,7 +1172,7 @@ async def download_dataset_files_by_doi(
     list_files_url = f"https://data.cipotato.org/api/datasets/:persistentId/versions/:latest/files?persistentId={doi}"
 
     try:
-        async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+        async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=30.0) as client:
             await ctx.report_progress(
                 progress=10, total=100, message=f"Fetching file list for DOI: {doi}..."
             )
@@ -1330,7 +1340,7 @@ async def list_dataset_files(
     params = {"persistentId": persistent_id}
     headers = _build_auth_headers(api_token)
 
-    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=30.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -1428,7 +1438,7 @@ async def list_dataverse_collections(
     url = f"{resolved_base}/api/dataverses/{parent_alias}/contents"
     headers = _build_auth_headers(api_token)
 
-    async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=20.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -1498,7 +1508,7 @@ async def create_dataverse_collection(
     headers = _build_auth_headers(api_token)
     headers["Content-Type"] = "application/json"
 
-    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=30.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -1555,7 +1565,7 @@ async def view_dataverse_collection(
     params = {"returnOwners": "true"} if return_owners else None
     headers = _build_auth_headers(api_token)
 
-    async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=20.0) as client:
         try:
             await ctx.report_progress(
                 progress=0, total=1, message=f"Retrieving collection '{id_or_alias}'..."
@@ -1637,7 +1647,7 @@ async def get_dataset_schema_for_collection(
     url = f"{resolved_base}/api/dataverses/{collection_id}/datasetSchema"
     headers = _build_auth_headers(api_token)
 
-    async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=20.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -1740,7 +1750,7 @@ async def create_dataset_in_collection(
     headers = _build_auth_headers(api_token)
     headers["Content-Type"] = "application/json"
 
-    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=30.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -1824,7 +1834,7 @@ async def update_dataset_metadata(
     headers = _build_auth_headers(api_token)
     headers["Content-Type"] = "application/json"
 
-    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=30.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -1950,7 +1960,7 @@ async def edit_dataset_metadata(
     headers = _build_auth_headers(api_token)
     headers["Content-Type"] = "application/json"
 
-    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=30.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -2055,7 +2065,7 @@ async def add_file_to_dataset(
     if json_payload:
         data["jsonData"] = json.dumps(json_payload)
 
-    async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=120.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -2160,7 +2170,7 @@ async def update_file_categories(
 
     body = {"categories": categories}
 
-    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=30.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -2229,7 +2239,7 @@ async def set_embargo_on_dataset_files(
     if reason:
         body["reason"] = reason
 
-    async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=20.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -2289,7 +2299,7 @@ async def unset_embargo_on_dataset_files(
     headers["Content-Type"] = "application/json"
     body = {"fileIds": file_ids}
 
-    async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=20.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -2354,7 +2364,7 @@ async def publish_dataset(
         params["assureIsIndexed"] = "true"
     headers = _build_auth_headers(api_token)
 
-    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=30.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -2432,7 +2442,7 @@ async def delete_dataset_draft(
         target_desc = f"persistentId {persistent_id}"
     headers = _build_auth_headers(api_token)
 
-    async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=20.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -2518,7 +2528,7 @@ async def replace_file_in_dataset(
     if metadata:
         data["jsonData"] = json.dumps(metadata)
 
-    async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=120.0) as client:
         try:
             await ctx.report_progress(
                 progress=0,
@@ -2588,7 +2598,7 @@ async def delete_file_from_dataset(
 
     headers = _build_auth_headers()
 
-    async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+    async with httpx.AsyncClient(verify=VERIFY_TLS, timeout=20.0) as client:
         try:
             target = (
                 f"file_id={file_id}"

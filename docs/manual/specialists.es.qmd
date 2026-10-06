@@ -27,8 +27,8 @@ puede hacer el equipo.
 ::: {.callout-note}
 Algunos especialistas (Academic Researcher, PDF Librarian, Data Voyager, Hypothesis Generator y
 AutoDiscovery) usan el servicio **Asta**, así que necesitas haber iniciado sesión en Asta
-durante la configuración. El Dataverse Explorer necesita el inicio de sesión en el **CIP
-Dataverse**.
+durante la configuración. El Dataverse Explorer **no necesita iniciar sesión**: busca
+directamente en el CIP Dataverse público.
 :::
 
 ## De dónde vienen los datos {#data-sources}

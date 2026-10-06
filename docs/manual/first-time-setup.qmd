@@ -138,15 +138,15 @@ account to use, then click **Sign in again**.
 
 ### 7. CIP Dataverse (optional, recommended)
 
-**What it is:** the **CIP Dataverse** is CIP's catalogue of research datasets. Signing in lets
-Mini-Me search it for you.
+**What it is:** the **CIP Dataverse** is CIP's catalogue of research datasets. Mini-Me searches
+it with a small tool that comes with the app.
 
-**What you do:** click **Sign in to CIP Dataverse**. A browser page opens — sign in with your
-**CIP account**. Then return to Mini-Me.
+**What you do:** nothing. This step only checks that the tool is installed. Searching public
+datasets needs **no account and no sign-in**.
 
 ::: {.callout-warning}
-If you skip this step, Mini-Me **won't find any datasets** when you ask it to search the
-Dataverse.
+If this step shows a warning, Mini-Me **won't find any datasets** when you ask it to search the
+Dataverse. Update or reinstall Mini-Me, then open it again.
 :::
 
 ## Buttons at the bottom of the window
