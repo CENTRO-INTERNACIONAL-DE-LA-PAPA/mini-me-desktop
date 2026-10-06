@@ -56,21 +56,33 @@ The Sources list tells you how many of them **"came from the model rather than f
 ## Datasets
 
 When the **Dataverse Explorer** finds datasets, it lists them in its answer with their title,
-a short description and a link to their page in the CIP Dataverse. Click a link to open the
-dataset's page in your browser.
+a short description and a link to their page in the CIP Dataverse. They also appear in the
+**Datasets** section of the Pinboard, which shows how many were recommended out of how many
+the search found (for example *Datasets (9 of 16)*).
 
-To work with a dataset, ask for it — for example *"Download the second dataset and profile
-it"*. Only **public** datasets can be downloaded; for restricted ones, use the dataset's page to
-request access from CIP.
+**To download a dataset**, click **View and Download** (or any dataset in the section). The
+list that opens has a **Download** button for each dataset; the files are saved into this
+conversation's folder, where the specialists can analyse them. Mini-Me cannot download datasets
+by itself — this button is the way. Only **public** datasets can be downloaded; for restricted
+ones, use the dataset's page to request access from CIP.
 
 ## Your PDFs
 
 When you give Mini-Me PDF files, the **PDF Librarian** reads them and keeps them in this
-conversation's library. The PDFs themselves are listed under **Files**.
+conversation's library. The **PDF Library** section of the Pinboard shows the first few;
+click **View All** to see and search the whole library. The PDFs themselves are listed under
+**Files**.
 
 To search inside your PDFs, just ask — for example *"Which of my PDFs discuss frost
 damage?"*. Mini-Me searches **by meaning**, so it finds relevant passages even if they don't use
 your exact words.
+
+## Hypotheses, analyses and discoveries
+
+When the **Hypothesis Generator**, **Data Voyager** or **AutoDiscovery** have worked in this
+conversation, their results are listed in the **Hypotheses**, **Analyses** and **Discoveries**
+sections of the Pinboard. **Discoveries** also lists an AutoDiscovery run that could not be
+prepared, so you can see that it failed.
 
 ## Reports
 

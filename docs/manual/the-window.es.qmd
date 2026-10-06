@@ -42,7 +42,12 @@ que desplazarte por el chat para encontrarlo:
 - **Plan**: los pasos que sigue Mini-Me para la pregunta actual.
 - **Background Jobs**: tareas largas que siguen en ejecución.
 - **Files**: gráficos, datos limpios, informes y otros archivos.
+- **Datasets**: los conjuntos de datos del CIP Dataverse recomendados para tu pregunta, y dónde
+  descargarlos.
 - **Sources**: los artículos y referencias que se usaron.
+- **PDF Library**: los PDF que el PDF Librarian leyó para esta conversación.
+- **Hypotheses**, **Analyses** y **Discoveries**: ideas, hallazgos comprobados y ejecuciones de
+  AutoDiscovery, cuando esos especialistas han trabajado.
 
 Puedes ocultar o mostrar el Pinboard con el botón de su parte superior. Consulta
 [Tus resultados](results.es.qmd).

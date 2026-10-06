@@ -62,21 +62,34 @@ antes de citarlas.
 ## Conjuntos de datos
 
 Cuando el **Dataverse Explorer** encuentra conjuntos de datos, los lista en su respuesta con su
-título, una breve descripción y un enlace a su página en el CIP Dataverse. Haz clic en un
-enlace para abrir la página del conjunto de datos en tu navegador.
+título, una breve descripción y un enlace a su página en el CIP Dataverse. También aparecen en
+la sección **Datasets** del Pinboard, que muestra cuántos se recomendaron del total que encontró
+la búsqueda (por ejemplo, *Datasets (9 of 16)*).
 
-Para trabajar con un conjunto de datos, pídelo; por ejemplo, *"Descarga el segundo conjunto de
-datos y perfílalo"*. Solo se pueden descargar los conjuntos de datos **públicos**; para los
+**Para descargar un conjunto de datos**, haz clic en **View and Download** (o en cualquier
+conjunto de datos de la sección). La lista que se abre tiene un botón **Download** para cada
+uno; los archivos se guardan en la carpeta de esta conversación, donde los especialistas pueden
+analizarlos. Mini-Me no puede descargar conjuntos de datos por su cuenta: este botón es la
+forma de hacerlo. Solo se pueden descargar los conjuntos de datos **públicos**; para los
 restringidos, usa la página del conjunto de datos para solicitar acceso al CIP.
 
 ## Tus PDF
 
 Cuando le das archivos PDF a Mini-Me, el **PDF Librarian** los lee y los guarda en la
-biblioteca de esta conversación. Los PDF mismos aparecen en **Files**.
+biblioteca de esta conversación. La sección **PDF Library** del Pinboard muestra los primeros;
+haz clic en **View All** para ver y buscar en toda la biblioteca. Los PDF mismos aparecen en
+**Files**.
 
 Para buscar dentro de tus PDF, simplemente pregunta; por ejemplo, *"¿Cuáles de mis PDF hablan
 de daños por heladas?"*. Mini-Me busca **por significado**, así que encuentra pasajes
 relevantes aunque no usen tus palabras exactas.
+
+## Hipótesis, análisis y descubrimientos
+
+Cuando el **Hypothesis Generator**, **Data Voyager** o **AutoDiscovery** han trabajado en esta
+conversación, sus resultados aparecen en las secciones **Hypotheses**, **Analyses** y
+**Discoveries** del Pinboard. **Discoveries** también muestra una ejecución de AutoDiscovery que
+no se pudo preparar, para que sepas que falló.
 
 ## Informes
 

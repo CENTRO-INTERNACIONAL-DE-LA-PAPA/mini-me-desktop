@@ -109,7 +109,7 @@ impl Refusal {
                 human_size(*bytes),
                 human_size(SIZE_LIMIT)
             ),
-            Refusal::Empty => "this version has no downloadable files".to_string(),
+            Refusal::Empty => "This version has no downloadable files".to_string(),
         }
     }
 }

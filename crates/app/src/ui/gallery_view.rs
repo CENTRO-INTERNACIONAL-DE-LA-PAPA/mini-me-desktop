@@ -896,7 +896,7 @@ impl Workbench {
                 .children(self.plan_section(cx))
                 .children(self.jobs_section(cx))
                 .children(self.outputs_section(cx))
-                .children(self.sources_pinboard_section(cx));
+                .children(self.result_pinboard_sections(cx));
         };
 
         if !project.completed.is_empty() {
@@ -914,7 +914,7 @@ impl Workbench {
             .children(self.plan_section(cx))
             .children(self.jobs_section(cx))
             .children(self.outputs_section(cx))
-            .children(self.sources_pinboard_section(cx))
+            .children(self.result_pinboard_sections(cx))
     }
 }
 
@@ -1730,6 +1730,179 @@ impl Workbench {
         }
         let title = format!("Sources ({})", self.sources.len());
         Some(pinboard_section(title, self.pinboard_sources_list(cx)))
+    }
+
+    /// The Datasets section of the Pinboard: what the Dataverse Explorer recommended, and the way
+    /// into the dataset list, which is where a dataset is checked for restricted files and
+    /// downloaded into this conversation. Nothing when nothing was recommended.
+    ///
+    /// The Pinboard rework (8ab8940) dropped the old "datasets · open all" bucket heading, and with
+    /// it the only call to [`Workbench::open_datasets`] — so a recommended dataset could no longer
+    /// be fetched, and an analysis asked for next found an empty folder. Built like Sources so the
+    /// two sections read as one panel.
+    pub(crate) fn datasets_pinboard_section(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.datasets.is_empty() {
+            return None;
+        }
+        let title = format!(
+            "Datasets ({})",
+            datasets_heading(self.datasets.len(), self.search_totals)
+        );
+        let mut list = div().flex().flex_col().gap_2();
+        for (at, dataset) in self.datasets.iter().enumerate().take(SOURCES_IN_PANEL) {
+            let doi = dataset
+                .persistent_id
+                .strip_prefix("doi:")
+                .unwrap_or(&dataset.persistent_id)
+                .to_string();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("panel-dataset-{at}")))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .w_full()
+                    .min_w_0()
+                    .p_2()
+                    .rounded_lg()
+                    // The whole row opens the list, where this dataset's download is.
+                    .hover(|style| style.bg(rgb(theme::background())).cursor_pointer())
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.open_datasets(cx);
+                    }))
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text()))
+                            .text_xs()
+                            .child(dataset.title.clone()),
+                    )
+                    // The DOI as well as the title: five records of one multi-site study share a
+                    // title, and the identifier is what tells them apart (docs §223).
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text_muted()))
+                            .text_xs()
+                            .child(doi),
+                    ),
+            );
+        }
+        // Always shown, not only when some are hidden: this is the way to download, not just the
+        // way to see the rest.
+        list = list.child(
+            ui::Button::new(SharedString::from("open-all-datasets"))
+                .icon(ui::Icon::new("icons/plus.svg"))
+                .text("View and Download")
+                .style(ui::ButtonStyle::Secondary)
+                .alignment(Alignment::Center)
+                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    workbench.open_datasets(cx);
+                })),
+        );
+        Some(pinboard_section(title, list))
+    }
+
+    /// The PDF Library section: the documents the PDF Librarian has indexed for this
+    /// conversation, and the way into the full library window. Nothing when there are none.
+    ///
+    /// Restored after the Pinboard rework (8ab8940) dropped the "library · open all" bucket
+    /// heading, which was the only place `documents_open` was ever set.
+    pub(crate) fn library_pinboard_section(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.documents.is_empty() {
+            return None;
+        }
+        let title = format!("PDF Library ({})", self.documents.len());
+        let mut list = div().flex().flex_col().gap_2();
+        for (at, document) in self.documents.iter().enumerate().take(SOURCES_IN_PANEL) {
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("panel-document-{at}")))
+                    .w_full()
+                    .min_w_0()
+                    .p_2()
+                    .rounded_lg()
+                    .hover(|style| style.bg(rgb(theme::background())).cursor_pointer())
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.open_library(cx);
+                    }))
+                    .text_color(rgb(theme::text()))
+                    .text_xs()
+                    .child(document.title.clone()),
+            );
+        }
+        list = list.child(
+            ui::Button::new(SharedString::from("open-all-documents"))
+                .icon(ui::Icon::new("icons/plus.svg"))
+                .text("View All")
+                .style(ui::ButtonStyle::Secondary)
+                .alignment(Alignment::Center)
+                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    workbench.open_library(cx);
+                })),
+        );
+        Some(pinboard_section(title, list))
+    }
+
+    /// Open the PDF Library window, refreshed from Asta's durable index at the moment it is asked
+    /// for. That also repairs conversations whose checkpoint predates the cumulative reducer.
+    fn open_library(&mut self, cx: &mut Context<Self>) {
+        self.reload_documents();
+        self.documents_open = true;
+        cx.notify();
+    }
+
+    /// One of the agent's result lists — hypotheses, analyses, discoveries — as a Pinboard
+    /// section. Nothing when that list is empty.
+    ///
+    /// These arrive as artifact buckets and were drawn by the old bucket loop the Pinboard rework
+    /// removed; since then they reached the panel's empty-check and nothing else. Discoveries
+    /// matters most: a failed AutoDiscovery draft is neither a draft to approve nor a job to poll,
+    /// so this list is the only place it appears (§249). Read-only rows, because none of these has
+    /// a window of its own to open; the rest are counted rather than hidden.
+    pub(crate) fn bucket_pinboard_section(&self, bucket: &str, heading: &str) -> Option<Div> {
+        let items = &self.buckets.iter().find(|candidate| candidate.name == bucket)?.items;
+        if items.is_empty() {
+            return None;
+        }
+        let mut list = div().flex().flex_col().gap_2();
+        for item in items.iter().take(SOURCES_IN_PANEL) {
+            list = list.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .p_2()
+                    .rounded_lg()
+                    .text_color(rgb(theme::text()))
+                    .text_xs()
+                    .child(item.clone()),
+            );
+        }
+        let hidden = items.len().saturating_sub(SOURCES_IN_PANEL);
+        if hidden > 0 {
+            list = list.child(
+                div()
+                    .px_2()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child(format!("+{hidden} more")),
+            );
+        }
+        Some(pinboard_section(format!("{heading} ({})", items.len()), list))
+    }
+
+    /// Every result section of the Pinboard below Outputs, in reading order: what was found to
+    /// work with (datasets, references, the PDF library), then what the agent concluded.
+    pub(crate) fn result_pinboard_sections(&self, cx: &mut Context<Self>) -> Vec<Div> {
+        [
+            self.datasets_pinboard_section(cx),
+            self.sources_pinboard_section(cx),
+            self.library_pinboard_section(cx),
+            self.bucket_pinboard_section("hypotheses", "Hypotheses"),
+            self.bucket_pinboard_section("analyses", "Analyses"),
+            self.bucket_pinboard_section("discoveries", "Discoveries"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// The Pinboard's own reference list, capped to [`SOURCES_IN_PANEL`].

@@ -1731,7 +1731,7 @@ impl Workbench {
                                     let fill = theme::hover_over(theme::surface());
                                     style.bg(rgb(fill)).cursor_pointer()
                                 })
-                                .child(if picked { "✓ selected" } else { "select" })
+                                .child(if picked { "✓ Selected" } else { "Select" })
                                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
                                     cx.stop_propagation();
                                     workbench.toggle_dataset_pick(pick_id.clone(), cx);

@@ -61,6 +61,27 @@ from backend.pdf_tools import read_pdf
 from backend.theory_tools import generate_theories
 
 
+def availability_note(services: list[dict[str, str]]) -> str:
+    """What the coordinator is told about integrations that are down for this run.
+
+    Dataverse is named only when *it* is down. The sentence used to be appended whenever any
+    service was unavailable, so a run missing only Asta was told about "CIP Dataverse being
+    unavailable", and the model answered that it could not search the Dataverse at all.
+    """
+    unavailable = [service for service in services if service["status"] == "unavailable"]
+    if not unavailable:
+        return ""
+    note = (
+        "\n\nHosted MCP availability for this run:\n"
+        f"Unavailable: {', '.join(service['name'] for service in unavailable)}. Continue with "
+        "available tools. Do not claim an unavailable integration was consulted and never "
+        "fabricate its results."
+    )
+    if any(service["id"] == "dataverse" for service in unavailable):
+        note += " CIP Dataverse is unavailable, so dataverse_explorer is unavailable."
+    return note
+
+
 def make_backend(sandbox_backend: "LocalWorkspaceBackend"):
     """Compose the agent's filesystem backend.
 
@@ -180,19 +201,9 @@ async def agent(config: RunnableConfig):
             if subagent.get("name") != "dataverse_explorer"
         ]
 
-    unavailable = [
-        service["name"]
-        for service in mcp_status_report()["services"]
-        if service["status"] == "unavailable"
-    ]
-    coordinator_prompt = COORDINATOR_SYSTEM_PROMPT
-    if unavailable:
-        coordinator_prompt += (
-            "\n\nHosted MCP availability for this run:\n"
-            f"Unavailable: {', '.join(unavailable)}. Continue with available tools. "
-            "Do not claim an unavailable integration was consulted and never fabricate its "
-            "results. CIP Dataverse being unavailable means dataverse_explorer is unavailable."
-        )
+    coordinator_prompt = COORDINATOR_SYSTEM_PROMPT + availability_note(
+        mcp_status_report()["services"]
+    )
 
     backend = make_backend(sandbox_backend=sandbox_backend)
     permissions = _build_filesystem_permissions()

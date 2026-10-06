@@ -243,3 +243,25 @@ def test_modern_mcp_elicitation_pauses_and_resumes_through_langgraph() -> None:
         assert "date=2026-09-14" in json.dumps(resumed["result"])
 
     _run(scenario())
+
+
+def test_dataverse_is_only_named_unavailable_when_it_is():
+    """A run missing only Asta was told "CIP Dataverse being unavailable…" and refused to search."""
+    from backend.agent import availability_note
+
+    def services(**states):
+        return [
+            {"id": server_id, "name": mcp_tools.MCP_SERVER_LABELS.get(server_id, server_id),
+             "status": status}
+            for server_id, status in states.items()
+        ]
+
+    asta_down = availability_note(services(asta="unavailable", dataverse="available"))
+    assert "Asta" in asta_down
+    assert "Dataverse" not in asta_down
+    assert "dataverse_explorer" not in asta_down
+
+    dataverse_down = availability_note(services(asta="available", dataverse="unavailable"))
+    assert "dataverse_explorer is unavailable" in dataverse_down
+
+    assert availability_note(services(asta="available", dataverse="checking")) == ""
