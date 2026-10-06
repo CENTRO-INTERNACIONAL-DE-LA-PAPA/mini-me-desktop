@@ -25,6 +25,6 @@
 | **Restart the backend** | Resuelve muchos problemas de "no responde". |
 | **Run setup checks** | Vuelve a abrir la ventana Get Started. |
 | **Settings** | Abre Settings (configuración). |
-| **User manual** | Abre el manual en inglés en tu navegador. Para la versión en español, usa **Settings → Help → Manual de usuario**. |
-| **About Mini-Me** | Información de la versión, fuentes de datos y cómo citar. |
+| **User manual** | Abre el manual en inglés en tu navegador. Para la versión en español, haz clic en **Español** en la barra lateral del manual. |
+| **About Mini-Me** | Abre **Settings → About**: versión, fuentes de datos y cómo citar. |
 | **Quit** | Cierra Mini-Me. |

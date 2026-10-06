@@ -73,7 +73,7 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 /// this is only the researcher-facing name requested in §154, so it cannot become a second
 /// project registry or collide with a real folder of the same name.
 const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
-const ICON_PATHS: [&str; 38] = [
+const ICON_PATHS: [&str; 40] = [
     "icons/settings.svg",
     "icons/conversations.svg",
     "icons/research.svg",
@@ -112,6 +112,8 @@ const ICON_PATHS: [&str; 38] = [
     "icons/brain.svg",
     "icons/flask.svg",
     "icons/circuitry.svg",
+    "icons/floppy-disk.svg",
+    "icons/x.svg",
 ];
 
 /// The four small UI icons, compiled into the executable rather than read beside it.
@@ -166,6 +168,14 @@ impl AssetSource for Assets {
             "icons/brain.svg" => Some(include_bytes!("../assets/icons/brain.svg")),
             "icons/flask.svg" => Some(include_bytes!("../assets/icons/flask.svg")),
             "icons/circuitry.svg" => Some(include_bytes!("../assets/icons/circuitry.svg")),
+            "icons/floppy-disk.svg" => Some(include_bytes!("../assets/icons/floppy-disk.svg")),
+            "icons/x.svg" => Some(include_bytes!("../assets/icons/x.svg")),
+            // Partner logos for Settings → About. PNG, not SVG: `svg()` tints to one colour.
+            "images/cip-logo.png" => Some(include_bytes!("../assets/images/cip-logo.png")),
+            "images/cip-logo-white.png" => {
+                Some(include_bytes!("../assets/images/cip-logo-white.png"))
+            }
+            "images/allenai-logo.png" => Some(include_bytes!("../assets/images/allenai-logo.png")),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -1112,7 +1122,7 @@ enum Section {
     Model,
     Research,
     Backend,
-    Help,
+    About,
 }
 
 impl Section {
@@ -1122,7 +1132,7 @@ impl Section {
         Section::Model,
         Section::Research,
         Section::Backend,
-        Section::Help,
+        Section::About,
     ];
 
     fn label(self) -> &'static str {
@@ -1131,7 +1141,7 @@ impl Section {
             Section::Model => "Model",
             Section::Research => "Research",
             Section::Backend => "Backend",
-            Section::Help => "Help",
+            Section::About => "About",
         }
     }
 
@@ -1142,7 +1152,7 @@ impl Section {
             Section::Model => "icons/brain.svg",
             Section::Research => "icons/flask.svg",
             Section::Backend => "icons/circuitry.svg",
-            Section::Help => "icons/book-open-text.svg",
+            Section::About => "icons/book-open-text.svg",
         }
     }
 
@@ -1155,7 +1165,7 @@ impl Section {
                                endpoint url specialist",
             Section::Research => "asta token dataverse sources literature",
             Section::Backend => "port wsl ubuntu setup checks host execution approval",
-            Section::Help => "manual version about help",
+            Section::About => "about help manual version update cite citation credit data sources",
         }
     }
 
@@ -1172,7 +1182,7 @@ impl Section {
             Section::Model => "model",
             Section::Research => "research",
             Section::Backend => "backend",
-            Section::Help => "help",
+            Section::About => "about",
         }
     }
 }
@@ -1219,11 +1229,11 @@ impl Field {
 
     fn placeholder(self) -> &'static str {
         match self {
-            Field::ModelId => "e.g. a model released after this build",
+            Field::ModelId => "E.g. a model released after this build",
             Field::BaseUrl => "https://… (custom providers only)",
-            Field::ApiKey => "paste to set — stored in the OS keychain",
-            Field::AstaToken => "paste to set",
-            Field::AstaApiKey => "paste to set",
+            Field::ApiKey => "Paste to set — stored in the OS keychain",
+            Field::AstaToken => "Paste to set",
+            Field::AstaApiKey => "Paste to set",
             Field::Port => "2024",
         }
     }
@@ -1380,26 +1390,24 @@ impl Command {
 
     fn hint(self) -> &'static str {
         match self {
-            Command::RunTurn => "send what is in the composer",
-            Command::NewThread => "start a fresh conversation",
-            Command::RefreshSpine => "reload mission, completed and pending",
-            Command::ExpandTraces => "open every subagent group",
-            Command::CollapseTraces => "close every subagent group",
-            Command::CopyLastAnswer => "to the clipboard",
-            Command::CopySelected => "what you dragged over in the transcript (ctrl-c)",
-            Command::SelectWhole => "every message, ready to copy (ctrl-shift-a)",
-            Command::SpecialistInBackground => "sends the /name in the composer, without waiting",
-            Command::RestartBackend => "after updating the app — reloads its Python backend",
-            Command::RenderReport => "typeset with citations, into this conversation's folder",
-            Command::FileInProject => "its folder moves there too, so Explorer matches",
-            Command::OpenAbout => {
-                "what the specialists do, where the data comes from, how to cite it"
-            }
-            Command::OpenManual => "how to use Mini-Me, in your browser",
-            Command::OpenProvenance => "which specialists were consulted, and in what order",
-            Command::OpenSettings => "model, keys, execution (ctrl-,)",
-            Command::OpenOnboarding => "re-run the install checks and fixes shown on first launch",
-            Command::Quit => "close the window and the sidecar",
+            Command::RunTurn => "Send what is in the composer",
+            Command::NewThread => "Start a fresh conversation",
+            Command::RefreshSpine => "Reload mission, completed and pending",
+            Command::ExpandTraces => "Open every subagent group",
+            Command::CollapseTraces => "Close every subagent group",
+            Command::CopyLastAnswer => "Copies it to the clipboard",
+            Command::CopySelected => "What you dragged over in the transcript (Ctrl+C)",
+            Command::SelectWhole => "Every message, ready to copy (Ctrl+Shift+A)",
+            Command::SpecialistInBackground => "Sends the /name in the composer, without waiting",
+            Command::RestartBackend => "After updating the app — reloads its Python backend",
+            Command::RenderReport => "Typeset with citations, into this conversation's folder",
+            Command::FileInProject => "Its folder moves there too, so Explorer matches",
+            Command::OpenAbout => "Where the data comes from, how to cite it, the manual",
+            Command::OpenManual => "How to use Mini-Me, in your browser",
+            Command::OpenProvenance => "Which specialists were consulted, and in what order",
+            Command::OpenSettings => "Model, keys, execution (Ctrl+,)",
+            Command::OpenOnboarding => "Re-run the install checks and fixes shown on first launch",
+            Command::Quit => "Close the window and the sidecar",
         }
     }
 }
@@ -2291,8 +2299,6 @@ struct Workbench {
     /// A count rather than a flag, because sources arrive across several turns and a second
     /// batch can start while the first is still going.
     resolving: usize,
-    /// Whether the About window is showing.
-    about_open: bool,
     /// Whether the provenance window is showing, and which of its two views.
     provenance_open: bool,
     provenance_view: ProvenanceView,
@@ -2506,8 +2512,6 @@ struct Workbench {
     /// needs one anyway: focus left on an element the open pane no longer renders means key
     /// bindings — Escape among them — simply stop arriving.
     provenance_focus: gpui::FocusHandle,
-    /// The About window's own focus, for the same reason (docs §71).
-    about_focus: gpui::FocusHandle,
     /// The delete warning's focus. It has buttons but no text field, so leaving focus on the
     /// sidebar row it covers would make Escape depend on an element hidden behind the modal.
     delete_focus: gpui::FocusHandle,
@@ -2870,7 +2874,6 @@ impl Workbench {
             checked: HashMap::new(),
             repaired: HashMap::new(),
             resolving: 0,
-            about_open: false,
             provenance_open: false,
             provenance_view: ProvenanceView::Timeline,
             provenance_turn: None,
@@ -2930,7 +2933,6 @@ impl Workbench {
             open_picker: None,
             settings_focus: cx.focus_handle(),
             provenance_focus: cx.focus_handle(),
-            about_focus: cx.focus_handle(),
             delete_focus: cx.focus_handle(),
             mcp_notice_focus: cx.focus_handle(),
             sidebar_width: 300.,
@@ -3967,7 +3969,7 @@ impl Workbench {
         // registry is still empty, and "selected 0 messages" would be a lie about a feature
         // rather than a fact about the conversation.
         self.status = match self.text_selection.selected_text() {
-            Some(text) => format!("selected {} lines — ctrl-c to copy", text.lines().count()),
+            Some(text) => format!("selected {} lines — Ctrl+C to copy", text.lines().count()),
             None => "there is nothing in the transcript to select yet".into(),
         };
         cx.notify();
@@ -7047,12 +7049,6 @@ impl Workbench {
             cx.notify();
             return;
         }
-        if self.about_open {
-            self.about_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
         if self.provenance_open {
             self.provenance_open = false;
             self.restore_focus = true;
@@ -7305,15 +7301,6 @@ impl Workbench {
                     .child(self.settings_note.clone()),
             );
         }
-        footer = footer.child(
-            div()
-                .text_color(rgb(theme::text_faint()))
-                .text_xs()
-                .child(format!(
-                    "Keys live in your OS keychain, never in a file. {}",
-                    settings::settings_path().display()
-                )),
-        );
 
         ui::Modal::new("settings", "SETTINGS")
             .focus(&self.settings_focus)
@@ -7425,9 +7412,11 @@ impl Workbench {
                     .update(cx, |query, cx| query.set_placeholder("Find or name a project", cx));
                 cx.notify();
             }
+            // The About page lives in Settings now; the palette entry stays so it can still be
+            // found by name, and opens straight onto that page.
             Command::OpenAbout => {
-                self.about_open = true;
-                cx.notify();
+                self.open_settings(None, cx);
+                self.settings_section = Section::About;
             }
             Command::OpenManual => self.open_manual(backend::ManualLanguage::English, cx),
             Command::OpenProvenance => {
@@ -8643,12 +8632,6 @@ impl Render for Workbench {
         // first run before there is anything else worth opening.
         let root = if self.onboarding_open {
             root.child(self.onboarding_modal(cx))
-        } else {
-            root
-        };
-
-        let root = if self.about_open {
-            root.child(self.about_modal(cx))
         } else {
             root
         };

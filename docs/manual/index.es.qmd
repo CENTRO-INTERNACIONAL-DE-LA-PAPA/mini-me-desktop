@@ -41,8 +41,8 @@ aparecen **en negrita y en inglés**, tal como los verás en pantalla (por ejemp
 :::
 
 ::: {.callout-tip title="Abrir este manual desde Mini-Me"}
-Puedes abrir este manual en cualquier momento desde la aplicación: ve a **Settings → Help →
-Manual de usuario**.
+Puedes abrir este manual en cualquier momento desde la aplicación: ve a **Settings → About →
+Open user manual** y haz clic en **Español** en la barra lateral del manual.
 :::
 
 ::: {.callout-important title="Ten en cuenta"}

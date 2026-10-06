@@ -12,6 +12,18 @@ use gpui::{
     KeyBinding, ListAlignment, ListState, SharedString, StyledText, Window, WindowBounds, WindowOptions,
 };
 
+/// `text` with its first letter capitalised, for the status bar and toasts.
+///
+/// Status messages are written lower-case at dozens of call sites (and tests compare them that
+/// way), so they are capitalised once, where they are shown, rather than at every source.
+pub(crate) fn sentence_case(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// The glyph and colour that stand for a file's kind.
 ///
 /// Finer than [`workspace::Kind`], which groups by what a researcher *does* with a file and is

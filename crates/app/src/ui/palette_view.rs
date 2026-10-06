@@ -235,9 +235,9 @@ impl Workbench {
                             .border_color(rgb(theme::border()))
                             .text_color(rgb(theme::text_muted()))
                             .text_xs()
-                            .child("↑↓ select ·")
+                            .child("↑↓ Select ·")
                             .child(ui::Icon::new("icons/enter.svg").colour(theme::text_muted()))
-                            .child("run · esc close"),
+                            .child("Run · Esc Close"),
                     ),
             )
     }

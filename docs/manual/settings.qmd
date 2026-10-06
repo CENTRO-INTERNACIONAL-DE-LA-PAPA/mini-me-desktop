@@ -4,7 +4,7 @@ Open Settings by pressing **`Ctrl+,`** (Ctrl and comma), or press `Ctrl+P` and c
 **Settings**.
 
 Settings has five pages, listed on the left: **Appearance**, **Model**, **Research**,
-**Backend** and **Help**. Click a page to open it. To find a setting quickly, type in the
+**Backend** and **About**. Click a page to open it. To find a setting quickly, type in the
 **Search** box above the list — for example *key* shows **Model**, and *port* shows **Backend**.
 
 After making changes, click **Save** at the bottom left. It saves the changes on every page at
@@ -59,12 +59,24 @@ this: signing in to Asta during setup is enough.
 | **Run setup checks** | Opens the **Get Started** window, which checks your computer and fixes problems. | — |
 | **Backend port** | A technical setting. Leave it as it is unless IT asks you to change it. | `2024` |
 
-## Help
+## About
+
+This page says what Mini-Me is, which version you have, where its data comes from and how to
+cite it.
 
 **Version** shows which version of Mini-Me you have, for example
 *Mini-Me Desktop 0.3.40 (1c2e866)*. Include it when you report a problem.
 
-Click **Open user manual** to open this manual in your web browser. For the Spanish edition,
-click **Abrir manual en español** (in the **Manual de usuario** row). The manual comes with the
-app, so it works without an internet connection and always matches the version you have
+Click **Open user manual** to open this manual in your web browser. To read it in Spanish,
+click **Español** (with the translate icon) at the top of the manual's sidebar. The manual
+comes with the app, so it works without an internet connection and always matches the version you have
 installed.
+
+**WHERE THE DATA COMES FROM** lists the services Mini-Me searches: Asta, CIP Dataverse,
+AGROVOC and Crop Ontology. For what each one is used for, see
+[Where the data comes from](specialists.qmd#data-sources).
+
+**CITING THIS WORK** gives the AstaBench reference to cite if your work uses literature search
+results. Drag over it and press `Ctrl+C` to copy it.
+
+You can also open this page with `Ctrl+P` → **About Mini-Me**.

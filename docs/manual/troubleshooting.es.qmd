@@ -86,8 +86,8 @@ Contacta a alguien del equipo de **Digital & Data**.
 Para que puedan ayudarte, incluye:
 
 1. **Qué estabas haciendo** y qué salió mal (una captura de pantalla ayuda).
-2. **La versión de Mini-Me**: está en **Settings → Help → Version**. También puedes presionar
-   `Ctrl+P` → **About Mini-Me** y copiar la línea que te pide incluir.
+2. **La versión de Mini-Me**: está en **Settings → About → Version**. También puedes presionar
+   `Ctrl+P` → **About Mini-Me** para abrir esa página.
 3. **Los archivos de registro**: sus ubicaciones aparecen al final de la ventana **Run setup
    checks** (*Sidecar log* y *App log*).
 

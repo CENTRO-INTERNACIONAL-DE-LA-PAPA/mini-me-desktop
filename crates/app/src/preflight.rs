@@ -1439,8 +1439,8 @@ fn asta_identity(output: &str) -> String {
                 None => format!("{email} · expires {expires}"),
             }
         }
-        (Some(email), None) => format!("signed in as {email}"),
-        _ => "installed and signed in".to_string(),
+        (Some(email), None) => format!("Signed in as {email}"),
+        _ => "Installed and signed in".to_string(),
     }
 }
 
@@ -1768,7 +1768,7 @@ mod tests {
         // A changed table format loses the label, never the check.
         assert_eq!(
             asta_identity("something else entirely"),
-            "installed and signed in"
+            "Installed and signed in"
         );
     }
 

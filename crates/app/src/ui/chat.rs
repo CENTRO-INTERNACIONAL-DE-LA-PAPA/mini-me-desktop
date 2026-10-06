@@ -440,7 +440,7 @@ impl Workbench {
                             .text_color(rgb(theme::ink_on(fill)))
                             .cursor_pointer()
                     })
-                    .child("open it")
+                    .child("Open it")
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         workbench.collected_runs.clear();
                         workbench.open_conversation(thread_id.clone(), cx);

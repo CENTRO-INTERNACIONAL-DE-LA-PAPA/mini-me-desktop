@@ -26,5 +26,5 @@
 | **Run setup checks** | Open the Get Started window again. |
 | **Settings** | Open Settings. |
 | **User manual** | Open this manual in your browser. |
-| **About Mini-Me** | Version information, data sources and how to cite. |
+| **About Mini-Me** | Opens **Settings → About**: version, data sources and how to cite. |
 | **Quit** | Close Mini-Me. |

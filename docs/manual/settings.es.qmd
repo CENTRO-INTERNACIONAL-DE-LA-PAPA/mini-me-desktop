@@ -4,7 +4,7 @@ Abre la configuración (**Settings**) presionando **`Ctrl+,`** (Ctrl y coma), o 
 `Ctrl+P` y elige **Settings**.
 
 Settings tiene cinco páginas, listadas a la izquierda: **Appearance**, **Model**,
-**Research**, **Backend** y **Help**. Haz clic en una página para abrirla. Para encontrar una
+**Research**, **Backend** y **About**. Haz clic en una página para abrirla. Para encontrar una
 opción rápidamente, escribe en el cuadro **Search** que está sobre la lista; por ejemplo, *key*
 muestra **Model** y *port* muestra **Backend**. La búsqueda usa palabras en inglés.
 
@@ -62,12 +62,25 @@ no lo necesita: basta con iniciar sesión en Asta durante la configuración.
 | **Run setup checks** | Abre la ventana **Get Started**, que revisa tu computadora y corrige problemas. | — |
 | **Backend port** | Una opción técnica. Déjala como está, a menos que TI te pida cambiarla. | `2024` |
 
-## Help
+## About
+
+Esta página explica qué es Mini-Me, qué versión tienes, de dónde vienen sus datos y cómo
+citarlo.
 
 **Version** muestra qué versión de Mini-Me tienes; por ejemplo,
 *Mini-Me Desktop 0.3.40 (1c2e866)*. Inclúyela cuando informes un problema.
 
-Haz clic en **Abrir manual en español** (en la fila **Manual de usuario**) para abrir este
-manual en tu navegador web, o en **Open user manual** para abrir la versión en inglés. El manual
-viene con la aplicación, así que funciona sin conexión a internet y siempre corresponde a la
+Haz clic en **Open user manual** para abrir este manual en tu navegador web. Se abre en inglés;
+para leerlo en español, haz clic en **Español** (con el ícono de traducción) en la parte
+superior de la barra lateral del manual. El manual viene con la aplicación, así que funciona sin conexión a internet y siempre corresponde a la
 versión que tienes instalada.
+
+**WHERE THE DATA COMES FROM** lista los servicios en los que busca Mini-Me: Asta, CIP
+Dataverse, AGROVOC y Crop Ontology. Para saber para qué se usa cada uno, consulta
+[De dónde vienen los datos](specialists.es.qmd#data-sources).
+
+**CITING THIS WORK** muestra la referencia de AstaBench que debes citar si tu trabajo usa
+resultados de la búsqueda de literatura. Selecciónala arrastrando el ratón y presiona `Ctrl+C`
+para copiarla.
+
+También puedes abrir esta página con `Ctrl+P` → **About Mini-Me**.
