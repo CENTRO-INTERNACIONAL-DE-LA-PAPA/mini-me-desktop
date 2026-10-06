@@ -108,12 +108,15 @@ pub struct Check {
     ///
     /// A property of the check itself, set once at each call site, rather than derived from
     /// the current `state`: the checkpointer check can only ever be `Pass` or `Fail` and is
-    /// **not** optional even while green, and Asta/Dataverse stay optional even while green,
-    /// because the whole point is to answer "do I need to deal with this" independently of
+    /// **not** optional even while green, because the whole point is to answer "do I need to deal with this" independently of
     /// whether it currently happens to be fine. Deriving it from `state == Warn` would also
     /// have quietly re-created the bug `checkpointer`'s own history warns about: that check
     /// used to be a `Warn` and looked optional, and a researcher lost their conversation
     /// history to a row that read as safe to ignore (see the comment above it).
+    ///
+    /// No check is optional today. Asta and Dataverse were, until it was clear the app does
+    /// almost nothing a researcher came for without them; the field and its "Optional" tag in
+    /// Setup stay for the next check that genuinely is.
     pub optional: bool,
 }
 
@@ -159,13 +162,6 @@ impl Check {
             optional: false,
         }
     }
-
-    /// Marks a check as one a turn can succeed forever without — Asta and Dataverse, the
-    /// only two the coordinator has never needed to run at all.
-    fn optional(mut self) -> Self {
-        self.optional = true;
-        self
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -183,8 +179,9 @@ pub struct Report {
 }
 
 impl Report {
-    /// True when nothing blocks a turn. Warnings don't count — a missing `asta` costs
-    /// the user literature search, not the app.
+    /// True when nothing blocks a turn. Warnings don't count — an Asta account without the
+    /// theorizer permission still searches the literature. A missing Asta sign-in or a broken
+    /// Dataverse install is a `Fail` and does.
     pub fn ready(&self) -> bool {
         !self.checks.iter().any(|check| check.state == State::Fail)
     }
@@ -200,7 +197,7 @@ impl Report {
         let mut parts = vec![format!("{} ok", count(State::Pass))];
         for (state, word) in [
             (State::Fail, "to fix"),
-            (State::Warn, "optional"),
+            (State::Warn, "to check"),
             (State::Skip, "skipped"),
         ] {
             let n = count(state);
@@ -415,21 +412,22 @@ fn dataverse_check(payload: &str) -> Option<Check> {
     Some(Check {
         id: "dataverse",
         label: "CIP Dataverse (local MCP)",
-        state: if ready { State::Pass } else { State::Warn },
+        // Required: the server ships inside the app, so a failing check is a broken install
+        // rather than a service someone chose not to use.
+        state: if ready { State::Pass } else { State::Fail },
         detail: status.get("detail")?.as_str()?.into(),
         fixes: if ready {
             vec![]
         } else {
             vec![Fix::Manual(
-                "Reinstall or update the bundled Mini-Me backend and run uv sync --extra dev, \
-                 then restart the backend. The Dataverse MCP is included with the app and uses \
-                 its Python environment; AskPapa is not required. Remove any stale \
-                 MINIME_DATAVERSE_SERVER or MINIME_DATAVERSE_PYTHON overrides from the backend's \
-                 .env. Public dataset search needs neither an API key nor a hosted MCP sign-in."
+                "Install the latest Mini-Me update (or reinstall Mini-Me), then open it again. \
+                 The dataset search tool comes with the app and needs no account. Developers: \
+                 run uv sync --extra dev in the backend and remove any stale \
+                 MINIME_DATAVERSE_SERVER or MINIME_DATAVERSE_PYTHON overrides from its .env."
                     .into(),
             )]
         },
-        optional: true,
+        optional: false,
     })
 }
 
@@ -818,9 +816,12 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
 
     // ------------------------------------------------------------------- 5. the CLI
     //
-    // A warning, not a failure: the coordinator answers perfectly well without `asta`,
-    // it just cannot search the literature or run the theorizer. Overstating this would
-    // block a first run that would have worked.
+    // **Required.** It used to be a warning, on the grounds that the coordinator can answer
+    // without `asta`. In practice nearly every specialist leans on it — literature search, the
+    // theorizer, DataVoyager, AutoDiscovery — so a "working" app without it could do almost
+    // nothing a researcher came for. Missing or signed out is now a `Fail`, which keeps the
+    // guided Setup open until it is fixed. A signed-in account that merely lacks the theorizer
+    // permission stays a warning: literature search works for it.
     if can_probe {
         let found = probe(&config.shell_argv("command -v asta"));
         if found.ok {
@@ -869,8 +870,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                                      to enrol this one."
                                 )),
                             ],
-                        )
-                        .optional(),
+                        ),
                     );
                 } else {
                     checks.push(Check {
@@ -885,7 +885,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                         // lapses this is the only cure, and a button that appears only
                         // once you are broken is one you cannot find.
                         fixes: vec![sign_in],
-                        optional: true,
+                        optional: false,
                     });
                 }
             } else {
@@ -893,15 +893,15 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                     Check::failing(
                         "asta",
                         "Asta CLI",
-                        State::Warn,
-                        "installed, but you're not signed in yet",
+                        State::Fail,
+                        "installed, but you're not signed in yet — Mini-Me needs this to search \
+                         the literature and run most specialists",
                         vec![Fix::Run {
                             label: "Sign in to Asta",
                             argv: config.shell_argv("asta auth login"),
                             note: "opens a browser; the app refreshes the token itself after this",
                         }],
-                    )
-                    .optional(),
+                    ),
                 );
             }
         } else {
@@ -909,8 +909,8 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 Check::failing(
                     "asta",
                     "Asta CLI",
-                    State::Warn,
-                    "not installed — used for literature search and generating research theories",
+                    State::Fail,
+                    "not installed — needed for literature search and most specialists",
                     vec![
                         Fix::Run {
                             label: "Install the Asta CLI",
@@ -926,12 +926,11 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                                 .into(),
                         ),
                     ],
-                )
-                .optional(),
+                ),
             );
         }
     } else {
-        checks.push(Check::skip("asta", "Asta CLI", RUNTIME_FIRST).optional());
+        checks.push(Check::skip("asta", "Asta CLI", RUNTIME_FIRST));
     }
 
     // --------------------------------------------------- 5b. the local Dataverse MCP
@@ -1736,8 +1735,8 @@ mod tests {
         assert_eq!(ready.state, State::Pass);
         assert!(ready.fixes.is_empty());
         let missing = dataverse_check(r#"{"ready":false,"detail":"script missing"}"#).unwrap();
-        assert_eq!(missing.state, State::Warn);
-        assert!(missing.optional);
+        assert_eq!(missing.state, State::Fail);
+        assert!(!missing.optional);
         assert!(
             matches!(&missing.fixes[0], Fix::Manual(note) if note.contains("MINIME_DATAVERSE_SERVER"))
         );

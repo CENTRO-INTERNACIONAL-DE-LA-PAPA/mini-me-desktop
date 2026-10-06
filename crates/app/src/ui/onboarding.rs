@@ -198,9 +198,9 @@ impl Workbench {
                             .child(check.label),
                     )
                     .when(check.optional, |header| {
-                        // A turn works forever without this step — Asta and CIP Dataverse,
-                        // never anything a Fail-capable check would need to borrow. Said
-                        // beside the label so skipping it reads as a choice, not neglect.
+                        // A turn works forever without this step (no check is optional
+                        // today). Said beside the label so skipping it reads as a choice,
+                        // not neglect.
                         header.child(
                             div()
                                 .flex_none()

@@ -134,6 +134,11 @@ pub enum Auth {
 ///
 /// **Sorted and de-duplicated**, because a picker's order should not depend on what a server felt
 /// like returning, and OpenRouter lists some ids more than once across its provider routes.
+///
+/// **Models that say they cannot call tools are left out.** Mini-Me does nothing without tools,
+/// and such a model fails on the first request of every turn. OpenRouter lists each model's
+/// `supported_parameters`; one that has the list but not `"tools"` is skipped. A listing without
+/// the field (OpenAI, Mistral, Anthropic, most gateways) is kept, because absence says nothing.
 pub fn parse(body: &serde_json::Value) -> Vec<String> {
     let mut ids: Vec<String> = body
         .get("data")
@@ -141,6 +146,7 @@ pub fn parse(body: &serde_json::Value) -> Vec<String> {
         .map(|entries| {
             entries
                 .iter()
+                .filter(|entry| can_use_tools(entry))
                 .filter_map(|entry| entry.get("id")?.as_str())
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
@@ -151,6 +157,17 @@ pub fn parse(body: &serde_json::Value) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+/// Whether a listing entry allows tool calls, as far as it says.
+fn can_use_tools(entry: &serde_json::Value) -> bool {
+    match entry
+        .get("supported_parameters")
+        .and_then(serde_json::Value::as_array)
+    {
+        Some(parameters) => parameters.iter().any(|parameter| parameter == "tools"),
+        None => true,
+    }
 }
 
 /// Ask one provider what it offers.
@@ -315,6 +332,20 @@ mod tests {
         // A shape we do not understand is no models, not a panic and not a half-read list.
         assert!(parse(&serde_json::json!({"models": ["gemini-2.5-pro"]})).is_empty());
         assert!(parse(&serde_json::json!([])).is_empty());
+    }
+
+    #[test]
+    fn models_that_say_they_cannot_call_tools_are_not_offered() {
+        // OpenRouter's shape: each entry lists the parameters it accepts.
+        let body = serde_json::json!({
+            "data": [
+                {"id": "a/with-tools", "supported_parameters": ["temperature", "tools", "tool_choice"]},
+                {"id": "b/no-tools", "supported_parameters": ["temperature", "max_tokens"]},
+                // No field at all is how every other provider answers, and says nothing.
+                {"id": "c/unknown"}
+            ]
+        });
+        assert_eq!(parse(&body), ["a/with-tools", "c/unknown"]);
     }
 
     #[test]

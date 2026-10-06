@@ -106,10 +106,12 @@ different company, click **Skip this step**, finish the setup, and then add the 
 [Settings → Model](settings.qmd#model).
 :::
 
-### 6. Asta (optional, recommended)
+### 6. Asta (required)
 
 **What it is:** **Asta** is a service from the Allen Institute for AI. Mini-Me uses it to
-**search scientific papers**, read PDFs, and generate research ideas.
+**search scientific papers**, read PDFs, and generate research ideas — most specialists depend
+on it, so this step is **required**. Until you sign in, the setup window opens again each time
+you start Mini-Me.
 
 **What you do:**
 
@@ -136,7 +138,7 @@ If the step says your account **"can't generate research theories"**, literature
 works. Only the idea-generation feature needs extra permission — ask your team lead which Asta
 account to use, then click **Sign in again**.
 
-### 7. CIP Dataverse (optional, recommended)
+### 7. CIP Dataverse (required)
 
 **What it is:** the **CIP Dataverse** is CIP's catalogue of research datasets. Mini-Me searches
 it with a small tool that comes with the app.
@@ -145,8 +147,9 @@ it with a small tool that comes with the app.
 datasets needs **no account and no sign-in**.
 
 ::: {.callout-warning}
-If this step shows a warning, Mini-Me **won't find any datasets** when you ask it to search the
-Dataverse. Update or reinstall Mini-Me, then open it again.
+If this step shows a problem, the tool that comes with the app is missing or damaged: setup
+can't finish, and Mini-Me **won't find any datasets**. Install the latest Mini-Me update (or
+reinstall Mini-Me), then open it again.
 :::
 
 ## Buttons at the bottom of the window

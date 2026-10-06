@@ -1826,6 +1826,30 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
 ///
 /// Attach-only is deliberately *not* in the list: that mode is opt-in and its message
 /// already names its own fix, so a setup pane would be answering a question nobody asked.
+/// Whether a failed turn failed because the chosen model cannot call tools.
+///
+/// Mini-Me cannot work without tools: the coordinator reaches every specialist through one, and
+/// they search, read files and run code through theirs. Providers word the refusal differently —
+/// OpenRouter answers 404 *"No endpoints found that support tool use"*, Ollama-style servers
+/// *"… does not support tools"*, others name function calling — so the check is a short list of
+/// phrasings, compared case-insensitively.
+fn model_cannot_use_tools(message: &str) -> bool {
+    const MARKERS: [&str; 7] = [
+        "support tool use",
+        "does not support tools",
+        "do not support tools",
+        "tools are not supported",
+        "tool use is not supported",
+        "does not support function calling",
+        "function calling is not supported",
+    ];
+    let message = message.to_lowercase();
+    MARKERS.iter().any(|marker| message.contains(marker))
+}
+
+/// What the researcher reads in the conversation when [`model_cannot_use_tools`] matched.
+const NO_TOOLS_REPLY: &str = "This model can't use tools, and Mini-Me needs them to search, read files, run code and call its specialists. Choose a different model in **Settings → Model** (Ctrl+,) and ask again. If you set a model for a specific specialist, check that one too.";
+
 fn looks_like_a_setup_failure(message: &str) -> bool {
     const MARKERS: [&str; 5] = [
         "no langgraph.json",
@@ -4778,6 +4802,25 @@ impl Workbench {
             }
             TurnEvent::Error(message) => {
                 self.streaming = false;
+                // **Said in the conversation, not only in the status line.** A model that cannot
+                // call tools fails on the first request, so the turn has no answer at all and the
+                // red line held a provider's raw error and a log path. The question gets a reply
+                // saying what to change instead; the raw error stays in the log.
+                if model_cannot_use_tools(&message) {
+                    tracing::warn!(%message, "the model cannot use tools");
+                    match self.transcript.last_mut() {
+                        Some(last) if last.role == "mini-me" && last.body.is_empty() => {
+                            last.push_body(NO_TOOLS_REPLY);
+                        }
+                        _ => self
+                            .transcript
+                            .push(Message::new("mini-me", NO_TOOLS_REPLY.to_string())),
+                    }
+                    self.finish_turn(cx);
+                    self.status = "this model can't use tools — choose another in Settings".into();
+                    self.error = None;
+                    return;
+                }
                 self.finish_turn(cx);
                 self.status = "failed".into();
                 // A failure to *start* is a setup problem, not a turn problem, and
@@ -11040,6 +11083,26 @@ mod tests {
             "the run paused but no thread was recorded",
         ] {
             assert!(!looks_like_a_setup_failure(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_model_that_cannot_call_tools_is_recognised_however_it_is_worded() {
+        for message in [
+            "stream failed: Error code: 404 - {'error': {'message': 'No endpoints found that \
+             support tool use. To learn more about provider routing, visit: …', 'code': 404}}",
+            "registry.ollama.ai/library/gemma:2b does not support tools",
+            "This model does not support function calling",
+            "Tool use is not supported for this model",
+        ] {
+            assert!(model_cannot_use_tools(message), "{message}");
+        }
+        for message in [
+            "stream failed: 500 Internal Server Error",
+            "backend did not become healthy within 120 attempts",
+            "Error code: 401 - invalid API key",
+        ] {
+            assert!(!model_cannot_use_tools(message), "{message}");
         }
     }
 

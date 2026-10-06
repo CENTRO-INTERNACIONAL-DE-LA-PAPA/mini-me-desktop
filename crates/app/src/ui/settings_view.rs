@@ -1096,7 +1096,10 @@ impl Workbench {
             }
             pane = pane
                 .child(ui::Label::new("WHERE THE DATA COMES FROM").muted().size(ui::Size::Compact))
-                .child(sources);
+                .child(sources)
+                // A rule between the two halves: where the data comes from, then how to credit it.
+                // The same 1px `border()` line the Pinboard and the Settings rail draw.
+                .child(div().w_full().h(px(1.)).bg(rgb(theme::border())));
 
             // The Allen Institute asks that work using Asta cite AstaBench, and a tool that makes
             // their search easy while making the citation hard to find is taking something
