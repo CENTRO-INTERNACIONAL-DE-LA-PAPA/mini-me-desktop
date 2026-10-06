@@ -12,6 +12,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aiofiles>=24.1.0",
+    "httpx>=0.28.1",
     "dabest>=2025.10.20",
     "deepagents[quickjs]==0.6.1",
     "dotenv>=0.9.9",
@@ -65,4 +67,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["backend", "backend.middleware", "backend.routes"]
+packages = ["backend", "backend.middleware", "backend.routes", "backend.dataverse_mcp"]
+
+[tool.setuptools.package-data]
+"backend.dataverse_mcp" = ["*.json", "LICENSE", "README.md"]

@@ -49,8 +49,10 @@ para las hipótesis. Consulta con tu líder de equipo.
 
 ### El Dataverse nunca encuentra conjuntos de datos
 
-Probablemente no has iniciado sesión en el CIP Dataverse. Abre **Run setup checks** y haz clic
-en **Sign in to CIP Dataverse**.
+Abre **Run setup checks** y revisa la fila **CIP Dataverse**. Si muestra una advertencia, la
+herramienta de búsqueda que viene con Mini-Me falta o está dañada: actualiza o reinstala Mini-Me
+y vuelve a abrirlo. No hace falta iniciar sesión. Si la fila está bien, revisa tu conexión a
+internet: la búsqueda igual se hace en el Dataverse del CIP a través de la red.
 
 ### "Research service unavailable"
 
