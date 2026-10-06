@@ -151,6 +151,9 @@ pub(crate) fn bundled_backend_dir() -> Option<PathBuf> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ManualLanguage {
     English,
+    // Still shipped, but nothing in the app opens it directly any more: the manual has its own
+    // English/Spanish switch, so Settings → About offers one button.
+    #[allow(dead_code)]
     Spanish,
 }
 

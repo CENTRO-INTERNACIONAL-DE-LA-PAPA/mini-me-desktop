@@ -35,7 +35,7 @@ read these chapters in order:
 After that, use the other chapters when you need them.
 
 ::: {.callout-tip title="Opening this manual from Mini-Me"}
-You can open this manual at any time from inside the app: go to **Settings → Help → Open user
+You can open this manual at any time from inside the app: go to **Settings → About → Open user
 manual**, or press `Ctrl+P` and choose **User manual**.
 :::
 

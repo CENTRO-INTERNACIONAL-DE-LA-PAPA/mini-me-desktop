@@ -427,7 +427,7 @@ impl Workbench {
                             .flex_none()
                             .text_color(rgb(theme::accent()))
                             .text_xs()
-                            .child("install"),
+                            .child("Install"),
                     )
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         workbench.install_theme(id.clone(), cx);
@@ -793,7 +793,12 @@ impl Workbench {
         // argument that makes Zed's fifty pickers modal rather than panels (docs §51).
         let section = self.settings_section;
 
-        let mut pane = div().flex().flex_col().w_full().min_w_0().gap_3();
+        let mut pane = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_3();
         if section == Section::Appearance {
             // The list has not changed — it moved into a popup and gained a trigger. Zed puts
             // every choice behind one, and the reason shows the moment there is more than a
@@ -950,6 +955,15 @@ impl Workbench {
                     ),
             );
         }
+        // Under the key fields, on the two pages that have them, rather than in the footer of
+        // every page.
+        if matches!(section, Section::Model | Section::Research) {
+            pane = pane.child(
+                ui::Label::new("Keys are kept in your OS keychain, never in a file.")
+                    .muted()
+                    .size(ui::Size::Compact),
+            );
+        }
 
         // Each setting says what it does. Half of these are things a researcher has no reason
         // to have an opinion about until someone tells them — "Run code on this machine" is a
@@ -1012,15 +1026,32 @@ impl Workbench {
             ));
         }
 
-        if section == Section::Help {
+        // **About** — what used to be two places: this page (version, manual) and the separate
+        // About window from the palette. One page now, and the palette's "About Mini-Me" opens it.
+        if section == Section::About {
+            pane = pane.child(ui::Label::new(
+                "A research workbench where a team of AI specialists finds papers and datasets, \
+                 analyses your data, and writes up the findings.",
+            ));
+            // Where the version already is, because "is there a newer one" is the same question
+            // as "what am I running" with one more word.
+            let standing = match &self.update {
+                Some(standing) => update::describe(standing, &self.install),
+                // Said out loud, so the gap between launching and answering does not read as
+                // "there is nothing to report".
+                None => "Checking for a newer build…".to_string(),
+            };
             pane = pane.child(ui::setting_row(
                 "Version",
-                "Include this when reporting a problem.",
+                standing,
                 ui::Label::new(build_stamp()).muted(),
             ));
+            pane = pane.children(self.update_action(cx));
+            // One button: the manual has its own English/Spanish switch.
             pane = pane.child(ui::setting_row(
                 "User manual",
-                "Step-by-step help for everything in Mini-Me. Opens in your browser.",
+                "Step-by-step help for everything in Mini-Me, in English or Spanish. Opens in \
+                 your browser.",
                 ui::Button::new("open-manual")
                     .text("Open user manual")
                     .style(ui::ButtonStyle::Secondary)
@@ -1028,22 +1059,90 @@ impl Workbench {
                         workbench.open_manual(backend::ManualLanguage::English, cx);
                     })),
             ));
-            // In Spanish because it is for the people who would rather read Spanish.
-            pane = pane.child(ui::setting_row(
-                "Manual de usuario",
-                "Ayuda paso a paso en español. Se abre en tu navegador.",
-                ui::Button::new("open-manual-es")
-                    .text("Abrir manual en español")
-                    .style(ui::ButtonStyle::Secondary)
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.open_manual(backend::ManualLanguage::Spanish, cx);
-                    })),
-            ));
+
+            // Other people's catalogues, and which one an answer leaned on changes how it
+            // should be read.
+            let mut sources = div().flex().flex_col().w_full().min_w_0().gap_2();
+            for (name, what) in [
+                (
+                    "Asta",
+                    "Allen Institute for AI — academic literature search and citation tracing.",
+                ),
+                (
+                    "CIP Dataverse",
+                    "The International Potato Center's dataset catalogue, with persistent DOIs \
+                     and full metadata.",
+                ),
+                (
+                    "AGROVOC",
+                    "FAO's multilingual agricultural vocabulary, used to normalise crop, soil and \
+                     pest terminology.",
+                ),
+                (
+                    "Crop Ontology",
+                    "Standardised crop traits, genotypes and phenotypes, for comparability \
+                     across studies.",
+                ),
+            ] {
+                sources = sources.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .min_w_0()
+                        .child(ui::Label::new(name).colour(theme::accent()))
+                        .child(ui::Label::new(what).muted().size(ui::Size::Compact)),
+                );
+            }
+            pane = pane
+                .child(ui::Label::new("WHERE THE DATA COMES FROM").muted().size(ui::Size::Compact))
+                .child(sources);
+
+            // The Allen Institute asks that work using Asta cite AstaBench, and a tool that makes
+            // their search easy while making the citation hard to find is taking something
+            // without saying so (docs §103).
+            pane = pane
+                .child(ui::Label::new("CITING THIS WORK").muted().size(ui::Size::Compact))
+                .child(ui::Label::new(
+                    "Literature search is powered by Asta, from the Allen Institute for AI. If \
+                     your work uses output produced with it, please cite AstaBench:",
+                ))
+                // Selectable, because a citation you cannot copy is a citation you will retype
+                // wrongly. `ctrl-c` takes it once dragged over, like the transcript (docs §62).
+                // On `background()`, since this page already sits on `surface()`.
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_l_2()
+                        .border_color(rgb(theme::accent()))
+                        .bg(rgb(theme::background()))
+                        .text_color(rgb(theme::text()))
+                        .text_sm()
+                        .child(selection::Selectable::new(
+                            &self.text_selection,
+                            ASTA_CITATION.to_string(),
+                            StyledText::new(ASTA_CITATION),
+                        )),
+                )
+                .child(
+                    ui::Label::new(
+                        "Generative AI produced the analysis and prose in this app. Say so in \
+                         anything you publish from it, and have a subject-matter expert check it.",
+                    )
+                    .muted()
+                    .size(ui::Size::Compact),
+                )
+                .child(self.about_logos());
         }
 
         let actions = ui::actions()
             .child(
                 ui::Button::new("save-settings")
+                    .icon(ui::Icon::new("icons/floppy-disk.svg"))
                     .text("Save")
                     .style(ui::ButtonStyle::Primary)
                     .on_click(
@@ -1051,21 +1150,86 @@ impl Workbench {
                     ),
             )
             .child(
-                ui::Button::new("close-settings").text("Close").on_click(cx.listener(
-                    |workbench, _event, _window, cx| {
-                        // Closing without saving puts the saved palette back — the preview was a
-                        // look, not a change.
+                ui::Button::new("close-settings")
+                    .text("Close")
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        // Closing without saving puts the saved palette back — the preview was
+                        // a look, not a change.
                         let saved = settings::Settings::load();
                         workbench.applied_theme = saved.theme.clone();
                         settings::apply_theme(&saved);
                         workbench.settings_open = false;
                         workbench.restore_focus = true;
                         cx.notify();
-                    },
-                )),
+                    })),
             );
 
         self.preferences_window(pane, actions, cx)
     }
 }
 
+
+impl Workbench {
+    /// The CIP × Ai2 logos, last on the About page and scrolling with it.
+    ///
+    /// The colour CIP logo has brown and black lettering that vanishes on a dark palette, so dark
+    /// themes get the all-white one; Ai2's pink reads on both. The × marks the two as a
+    /// collaboration, not a pair of sponsors.
+    ///
+    /// **The CIP file is cropped to its ink.** It carries uneven blank margins (more on the left
+    /// than the right), so drawn whole it sat off-centre and the gap either side of the × looked
+    /// different. Ai2's file has no margin and is drawn as-is.
+    pub(crate) fn about_logos(&self) -> impl IntoElement {
+        // Both CIP variants: 1280×525, visible from (106, 61) to (1205, 471). Re-measure if the
+        // files change.
+        const CIP_FILE: (f32, f32) = (1280., 525.);
+        const CIP_INK: (f32, f32, f32, f32) = (106., 61., 1205., 471.);
+        const CIP_HEIGHT: f32 = 50.;
+        let scale = CIP_HEIGHT / (CIP_INK.3 - CIP_INK.1);
+
+        let cip = if theme::luminance(theme::surface()) > 0.5 {
+            "images/cip-logo.png"
+        } else {
+            "images/cip-logo-white.png"
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .w_full()
+            .pt_6()
+            .border_t_1()
+            .border_color(rgb(theme::border()))
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .w(px((CIP_INK.2 - CIP_INK.0) * scale))
+                    .h(px(CIP_HEIGHT))
+                    .overflow_hidden()
+                    .child(
+                        img(cip)
+                            .absolute()
+                            .left(px(-CIP_INK.0 * scale))
+                            .top(px(-CIP_INK.1 * scale))
+                            .w(px(CIP_FILE.0 * scale))
+                            .h(px(CIP_FILE.1 * scale)),
+                    ),
+            )
+            .child(
+                div()
+                    .text_2xl()
+                    .font_weight(FontWeight::LIGHT)
+                    .text_color(rgb(theme::text_muted()))
+                    .child("×"),
+            )
+            .child(
+                img("images/allenai-logo.png")
+                    .w(px(126.))
+                    .h(px(40.))
+                    .object_fit(gpui::ObjectFit::Contain),
+            )
+    }
+}

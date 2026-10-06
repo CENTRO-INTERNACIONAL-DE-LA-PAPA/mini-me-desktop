@@ -29,3 +29,19 @@ Some specialists (Academic Researcher, PDF Librarian, Data Voyager, Hypothesis G
 AutoDiscovery) use the **Asta** service, so you need to have signed in to Asta during
 setup. The Dataverse Explorer needs the **CIP Dataverse** sign-in.
 :::
+
+## Where the data comes from {#data-sources}
+
+When a specialist looks something up, it uses one of these services. Knowing which one an answer
+relied on helps you judge it — a dataset's catalogue page and a paper's abstract are different
+kinds of evidence.
+
+| Service | What it is | Used for |
+|---|---|---|
+| **Asta** | Academic literature search from the Allen Institute for AI (Ai2). | Finding and summarising papers, following citations. |
+| **CIP Dataverse** | The International Potato Center's catalogue of research datasets, each with a permanent DOI and full description. | Finding datasets. |
+| **AGROVOC** | FAO's multilingual vocabulary of agricultural terms. | Making crop, soil and pest names consistent. |
+| **Crop Ontology** | Standard names for crop traits, varieties and measurements. | Making results comparable across studies. |
+
+If your work uses literature search results, cite AstaBench — the reference is in
+**Settings → About**, under **CITING THIS WORK**.

@@ -493,7 +493,7 @@ On Windows, the three primary logs are:
 %TEMP%\mini-me-desktop-update.log
 ```
 
-Include the build stamp shown in **About Mini-Me** and the relevant logs when reporting a defect.
+Include the build stamp shown in **Settings → About** and the relevant logs when reporting a defect.
 
 ## Packaging and release
 

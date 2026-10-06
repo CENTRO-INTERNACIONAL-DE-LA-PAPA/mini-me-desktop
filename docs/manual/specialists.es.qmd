@@ -30,3 +30,19 @@ AutoDiscovery) usan el servicio **Asta**, así que necesitas haber iniciado sesi
 durante la configuración. El Dataverse Explorer necesita el inicio de sesión en el **CIP
 Dataverse**.
 :::
+
+## De dónde vienen los datos {#data-sources}
+
+Cuando un especialista busca información, usa uno de estos servicios. Saber en cuál se basó una
+respuesta te ayuda a evaluarla: la ficha de un conjunto de datos y el resumen de un artículo son
+evidencias de distinto tipo.
+
+| Servicio | Qué es | Para qué se usa |
+|---|---|---|
+| **Asta** | Búsqueda de literatura académica del Allen Institute for AI (Ai2). | Encontrar y resumir artículos, seguir citas. |
+| **CIP Dataverse** | El catálogo de conjuntos de datos de investigación del Centro Internacional de la Papa, cada uno con un DOI permanente y su descripción completa. | Encontrar conjuntos de datos. |
+| **AGROVOC** | El vocabulario agrícola multilingüe de la FAO. | Unificar los nombres de cultivos, suelos y plagas. |
+| **Crop Ontology** | Nombres estándar para rasgos, variedades y mediciones de cultivos. | Hacer comparables los resultados entre estudios. |
+
+Si tu trabajo usa resultados de la búsqueda de literatura, cita AstaBench: la referencia está en
+**Settings → About**, en **CITING THIS WORK**.

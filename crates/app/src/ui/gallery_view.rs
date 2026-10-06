@@ -400,7 +400,7 @@ impl Workbench {
                                     .hover(|style| {
                                         style.text_color(rgb(theme::accent())).cursor_pointer()
                                     })
-                                    .child("open outside")
+                                    .child("Open outside")
                                     .on_click(move |_event, _window, _cx| {
                                         if let Err(error) = workspace::open(&opened) {
                                             tracing::warn!(%error, "could not open a file");
@@ -1160,14 +1160,17 @@ impl Workbench {
                     .text_xs()
                     .child(match (&task.error, task.needs_approval(), task.needs_input()) {
                         (Some(error), _, _) => error.clone(),
-                        (None, _, true) => "waiting for your input".to_string(),
-                        (None, true, false) => "waiting for your approval".to_string(),
+                        (None, _, true) => "Waiting for your input".to_string(),
+                        (None, true, false) => "Waiting for your approval".to_string(),
                         // What it is *doing*, not just that it is doing something —
                         // "running" for ten minutes tells a researcher nothing about
                         // whether to wait (docs §42).
+                        // The status is the backend's own lower-case word; capitalised here.
                         (None, false, false) => match (&task.activity, task.is_finished()) {
-                            (Some(activity), false) => format!("{} · {activity}", task.status),
-                            _ => task.status.clone(),
+                            (Some(activity), false) => {
+                                format!("{} · {activity}", sentence_case(&task.status))
+                            }
+                            _ => sentence_case(&task.status),
                         },
                     }),
             )

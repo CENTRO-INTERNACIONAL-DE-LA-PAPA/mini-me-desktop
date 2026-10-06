@@ -815,12 +815,14 @@ pub fn describe(standing: &Standing, layout: &Layout) -> String {
             format!("{} is available — you have {}", release.tag, running_text())
         }
         (Standing::Behind(release), Layout::Source) => format!(
-            "{} is published, but this build came from source — update it with git",
+            "{} is published, but this build came from source — update it with Git",
             release.tag
         ),
-        (Standing::Current, _) => format!("{} — the newest published build", running_text()),
-        (Standing::Ahead, _) => format!("{} — newer than anything published", running_text()),
-        (Standing::Unknown(reason), _) => format!("could not check for updates: {reason}"),
+        // The version itself is already beside this line on the About page; saying it again
+        // here only repeated it.
+        (Standing::Current, _) => "Up to date".to_string(),
+        (Standing::Ahead, _) => "Newer than anything published".to_string(),
+        (Standing::Unknown(reason), _) => format!("Could not check for updates: {reason}"),
     }
 }
 
@@ -1081,10 +1083,10 @@ mod tests {
 
         // A source build is told the truth: there is a newer one, and this is not the way to it.
         let source = describe(&Standing::Behind(release_at("9.9.9")), &Layout::Source);
-        assert!(source.contains("git"), "{source}");
+        assert!(source.contains("Git"), "{source}");
 
-        assert!(describe(&Standing::Current, &packaged).contains("newest"));
-        assert!(describe(&Standing::Ahead, &packaged).contains("newer than anything"));
+        assert_eq!(describe(&Standing::Current, &packaged), "Up to date");
+        assert_eq!(describe(&Standing::Ahead, &packaged), "Newer than anything published");
 
         let unknown = describe(&Standing::Unknown("no network".into()), &packaged);
         assert!(unknown.contains("no network"), "the reason must survive: {unknown}");

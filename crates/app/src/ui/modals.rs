@@ -336,216 +336,6 @@ impl Workbench {
 }
 
 
-impl Workbench {
-    /// What this thing is, what the specialists do, and who to credit.
-    ///
-    /// Asked for after a look at the web app, which has one and this did not. Three jobs, and the
-    /// third is not optional:
-    ///
-    /// 1. **Say what the specialists are.** Ten of them delegate to each other and a researcher
-    ///    meets them one at a time, in a trace, mid-answer. A list is the cheapest orientation
-    ///    there is.
-    /// 2. **Say where the data comes from.** Asta, CIP Dataverse, AGROVOC and Crop Ontology are
-    ///    other people's catalogues, and which one an answer leaned on changes how it should be
-    ///    read.
-    /// 3. **Credit Asta.** The Allen Institute asks that work using it cite AstaBench, and a tool
-    ///    that makes their search easy to use while making the citation hard to find is taking
-    ///    something without saying so. The reference is here, selectable, next to a note about
-    ///    when it applies (docs §103).
-    ///
-    /// **The team list is read from the live registry**, not written here. §76 built that list
-    /// precisely so a copy in the client could not drift the first time upstream renamed a
-    /// specialist, and an About box that names agents the backend no longer has would be the
-    /// same defect wearing a friendlier face.
-    pub(crate) fn about_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let specialists = workspace::subagents();
-
-        let mut team = div().flex().flex_col().w_full().min_w_0().gap_2();
-        if specialists.is_empty() {
-            // Said rather than left blank: an empty list looks like "there are none", and the
-            // real reason is that the backend has not assembled a coordinator yet (docs §78).
-            team = team.child(
-                ui::Label::new(
-                    "The specialist list appears once the backend has answered its first question.",
-                )
-                .muted()
-                .size(ui::Size::Compact),
-            );
-        }
-        for specialist in &specialists {
-            team = team.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .min_w_0()
-                    .child(ui::Label::new(specialist.name.clone()).colour(theme::accent()))
-                    .child(
-                        ui::Label::new(specialist.description.clone())
-                            .muted()
-                            .size(ui::Size::Compact),
-                    ),
-            );
-        }
-
-        let mut sources = div().flex().flex_col().w_full().min_w_0().gap_2();
-        for (name, what) in [
-            (
-                "Asta",
-                "Allen Institute for AI — federated academic literature search and citation \
-                 tracing.",
-            ),
-            (
-                "CIP Dataverse",
-                "The International Potato Center's dataset catalogue, with persistent DOIs and \
-                 full metadata.",
-            ),
-            (
-                "AGROVOC",
-                "FAO's multilingual agricultural vocabulary, used to normalise crop, soil and \
-                 pest terminology.",
-            ),
-            (
-                "Crop Ontology",
-                "Standardised crop traits, genotypes and phenotypes, for comparability across \
-                 studies.",
-            ),
-        ] {
-            sources = sources.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .min_w_0()
-                    .child(ui::Label::new(name).colour(theme::accent()))
-                    .child(ui::Label::new(what).muted().size(ui::Size::Compact)),
-            );
-        }
-
-        // **Where code runs, as this install is actually configured.** The web app's About says
-        // every conversation runs in an isolated LangSmith sandbox; this app always runs code on
-        // the host instead, because a local-first workbench shipping the researcher's own files
-        // to a rented VM to be read was the wrong shape (docs §11). Saying the reassuring thing
-        // regardless is the defect this repo has already reported upstream in `guardrails.py`,
-        // and it would be worse to repeat it here, in the document that explains the product.
-        let execution = (
-            "Runs on this machine",
-            "Python and shell code the agent writes execute here, with your permissions, in \
-             this conversation's folder under Documents\\Mini-Me. Commands that touch your \
-             system stop for your approval first.",
-        );
-
-        let body = div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_w_0()
-            .gap_4()
-            .child(ui::Label::new(
-                "A research workbench. A coordinator delegates to specialists that search the \
-                 literature, find datasets, clean and analyse tabular data, build models, and \
-                 write the findings up.",
-            ))
-            .child(ui::Label::new("THE SPECIALISTS").colour(theme::text_faint()).size(ui::Size::Compact))
-            .child(team)
-            .child(ui::Label::new("WHERE THE DATA COMES FROM").colour(theme::text_faint()).size(ui::Size::Compact))
-            .child(sources)
-            .child(ui::Label::new("THIS BUILD").colour(theme::text_faint()).size(ui::Size::Compact))
-            // **Because a tester's report is unusable without it.** The app has never shown its
-            // own version anywhere: not in the window, not in the log, not in the About page. It
-            // logged the *backend* checkout's commit as its very first line (§115) and said nothing
-            // about itself — so "it doesn't work" from a second machine could be any of 183
-            // commits, and the first question back would always be the same one (§213).
-            //
-            // Selectable, like the citation below, because the whole point is pasting it into a
-            // message.
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .child(ui::Label::new(build_stamp()).colour(theme::accent()))
-                    .child(
-                        ui::Label::new(
-                            "Include this line when reporting a problem, with the two log files                              named in Setup.",
-                        )
-                        .muted()
-                        .size(ui::Size::Compact),
-                    )
-                    // Where the version already is, because that is where someone goes to ask
-                    // "what am I running" — and "is there a newer one" is the same question with
-                    // one more word. A separate pane for it would be a pane nobody opens.
-                    .child(
-                        ui::Label::new(match &self.update {
-                            Some(standing) => update::describe(standing, &self.install),
-                            // Said out loud, so the gap between launching and answering does not
-                            // read as "there is nothing to report".
-                            None => "checking for a newer build…".to_string(),
-                        })
-                        .muted()
-                        .size(ui::Size::Compact),
-                    )
-                    .children(self.update_action(cx)),
-            )
-            .child(ui::Label::new("WHERE CODE RUNS").colour(theme::text_faint()).size(ui::Size::Compact))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .min_w_0()
-                    .child(ui::Label::new(execution.0).colour(theme::accent()))
-                    .child(ui::Label::new(execution.1).muted().size(ui::Size::Compact)),
-            )
-            .child(ui::Label::new("CITING THIS WORK").colour(theme::text_faint()).size(ui::Size::Compact))
-            .child(ui::Label::new(
-                "Literature search is powered by Asta, from the Allen Institute for AI. If your \
-                 work uses output produced with it, please cite AstaBench:",
-            ))
-            // Selectable, because a citation you cannot copy is a citation you will retype
-            // wrongly. `ctrl-c` takes it once dragged over, like the transcript (docs §62).
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_l_2()
-                    .border_color(rgb(theme::accent()))
-                    .bg(rgb(theme::surface()))
-                    .text_color(rgb(theme::text()))
-                    .text_sm()
-                    .child(selection::Selectable::new(
-                        &self.text_selection,
-                        ASTA_CITATION.to_string(),
-                        StyledText::new(ASTA_CITATION),
-                    )),
-            )
-            .child(
-                ui::Label::new(
-                    "Generative AI produced the analysis and prose in this app. Say so in \
-                     anything you publish from it, and have a subject-matter expert check it.",
-                )
-                .muted()
-                .size(ui::Size::Compact),
-            );
-
-        ui::Modal::new("about", "About Mini-Me")
-            .width(640.)
-            .focus(&self.about_focus)
-            .body(body)
-            .actions(ui::actions().child(div().flex_grow()).child(
-                ui::Button::new("about-close").text("Close").on_click(cx.listener(
-                    |workbench, _event, _window, cx| {
-                        workbench.about_open = false;
-                        workbench.restore_focus = true;
-                        cx.notify();
-                    },
-                )),
-            ))
-    }
-}
-
 
 impl Workbench {
     /// A modern MCP input-required round: human-readable prompts, typed primitive fields, and
@@ -1166,7 +956,7 @@ impl Workbench {
             (Some(prior), Some(posterior)) => {
                 format!("{} → {}", prior.describe(), posterior.describe())
             }
-            _ => "no belief recorded".to_string(),
+            _ => "No belief recorded".to_string(),
         };
         detail = detail.child(
             div()
@@ -1189,7 +979,7 @@ impl Workbench {
                             experiment.direction().label(),
                             experiment.magnitude()
                         ),
-                        None => "not scored".to_string(),
+                        None => "Not scored".to_string(),
                     })
                     .colour(if experiment.surprising {
                         theme::warning()
@@ -1847,7 +1637,7 @@ impl Workbench {
         // search's; this is the agent's opinion of it, and a reader can disagree.
         if self.was_recommended(dataset) {
             row = row.child(
-                ui::Label::new("the agent put this one forward")
+                ui::Label::new("The agent put this one forward")
                     .colour(theme::accent())
                     .size(ui::Size::Compact),
             );
@@ -2343,7 +2133,7 @@ impl Workbench {
                                 .text_color(rgb(theme::accent_hover()))
                                 .cursor_pointer()
                         })
-                        .child("link")
+                        .child("Link")
                         .on_click(move |_event, _window, _cx| {
                             if let Err(error) = workspace::browse(&url) {
                                 tracing::warn!(%error, "could not open a source");
@@ -2461,7 +2251,7 @@ impl Workbench {
                     })
                     .child(ui::Label::new(format!("+{hidden} more")).inherit().size(ui::Size::Compact))
                     .child(
-                        ui::Label::new("open all")
+                        ui::Label::new("Open all")
                             .inherit()
                             .size(ui::Size::Compact),
                     )
@@ -2551,7 +2341,7 @@ impl Workbench {
             }
             if !command.cwd.is_empty() {
                 row = row.child(
-                    ui::Label::new(format!("working directory: {}", command.cwd))
+                    ui::Label::new(format!("Working directory: {}", command.cwd))
                         .muted()
                         .size(ui::Size::Compact),
                 );
@@ -2561,9 +2351,9 @@ impl Workbench {
             // appear during the command is a fact; a path merely mentioned may have been read.
             for path in &command.outside {
                 let (verb, tone) = if command.wrote.contains(path) {
-                    ("wrote, outside this conversation", theme::accent())
+                    ("Wrote, outside this conversation", theme::accent())
                 } else {
-                    ("named but not written", theme::text_faint())
+                    ("Named but not written", theme::text_faint())
                 };
                 row = row.child(
                     ui::Label::new(format!("{verb}: {path}"))
@@ -2580,7 +2370,7 @@ impl Workbench {
                 .filter(|path| !command.outside.contains(path))
             {
                 row = row.child(
-                    ui::Label::new(format!("wrote, outside this conversation: {path}"))
+                    ui::Label::new(format!("Wrote, outside this conversation: {path}"))
                         .colour(theme::accent())
                         .size(ui::Size::Compact),
                 );
@@ -2608,14 +2398,14 @@ impl Workbench {
             Some(Ok(collected)) => {
                 for (path, name) in &collected.brought {
                     body = body.child(
-                        ui::Label::new(format!("brought in as {name} — from {path}"))
+                        ui::Label::new(format!("Brought in as {name} — from {path}"))
                             .colour(theme::accent())
                             .size(ui::Size::Compact),
                     );
                 }
                 for (path, reason) in &collected.refused {
                     body = body.child(
-                        ui::Label::new(format!("left where it was: {path} — {reason}"))
+                        ui::Label::new(format!("Left where it was: {path} — {reason}"))
                             .muted()
                             .size(ui::Size::Compact),
                     );
@@ -2623,7 +2413,7 @@ impl Workbench {
             }
             Some(Err(error)) => {
                 body = body.child(
-                    ui::Label::new(format!("could not bring them in: {error}"))
+                    ui::Label::new(format!("Could not bring them in: {error}"))
                         .colour(theme::error())
                         .size(ui::Size::Compact),
                 );

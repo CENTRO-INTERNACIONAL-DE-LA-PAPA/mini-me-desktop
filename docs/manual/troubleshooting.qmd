@@ -82,8 +82,8 @@ Contact someone at the **Digital & Data** team.
 To help them help you, include:
 
 1. **What you were doing** and what went wrong (a screenshot helps).
-2. **The version of Mini-Me** — press `Ctrl+P` → **About Mini-Me** and copy the line it
-   asks you to include.
+2. **The version of Mini-Me** — it is in **Settings → About → Version**. You can also press
+   `Ctrl+P` → **About Mini-Me** to open that page.
 3. **The log files** — their locations are listed at the bottom of the **Run setup checks**
    window (*Sidecar log* and *App log*).
 

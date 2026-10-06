@@ -50,7 +50,7 @@ impl Workbench {
                         }
                         cx.notify();
                     }))
-                    .child(toast.clone()),
+                    .child(sentence_case(toast)),
             );
         }
         stack
@@ -81,7 +81,7 @@ impl Workbench {
                     (so_far.saturating_mul(100) / total).min(100)
                 };
                 return Some(
-                    ui::Label::new(format!("downloading {} — {percent}%", offer.tag))
+                    ui::Label::new(format!("Downloading {} — {percent}%", offer.tag))
                         .muted()
                         .size(ui::Size::Compact)
                         .into_any_element(),
@@ -118,7 +118,7 @@ impl Workbench {
         let mut column = div().flex().flex_col().w_full().min_w_0().gap_1();
         if let Some(reason) = line {
             column = column.child(
-                ui::Label::new(format!("could not download it: {reason}"))
+                ui::Label::new(format!("Could not download it: {reason}"))
                     .muted()
                     .size(ui::Size::Compact),
             );
@@ -191,8 +191,8 @@ impl Workbench {
 impl Workbench {
     pub(crate) fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (status_text, status_color) = match &self.error {
-            Some(error) => (error.clone(), theme::error()),
-            None => (self.status.clone(), theme::text_muted()),
+            Some(error) => (sentence_case(error), theme::error()),
+            None => (sentence_case(&self.status), theme::text_muted()),
         };
 
         div()
@@ -263,7 +263,7 @@ impl Workbench {
                     .flex_none()
                     .text_color(rgb(theme::text_muted()))
                     .text_xs()
-                    .child("ctrl-p commands"),
+                    .child("Ctrl+P for commands"),
             )
             .child(
                 div()

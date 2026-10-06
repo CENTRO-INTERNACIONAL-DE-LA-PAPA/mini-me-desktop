@@ -287,7 +287,7 @@ pub(crate) fn provenance_svg(graph: &provenance::Graph) -> String {
         let spans: Vec<String> = node.spans.iter().map(|ms| duration_label(*ms)).collect();
         let note = match node.visits {
             1 => spans.join(", "),
-            visits => format!("visited {visits} times · {}", spans.join(", ")),
+            visits => format!("Visited {visits} times · {}", spans.join(", ")),
         };
         out.push_str(&format!(
             "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-size=\"11\">{}</text>\n",
@@ -555,8 +555,8 @@ impl Workbench {
             )
             .footer(
                 ui::Label::new(match self.thread_workspace() {
-                    Some(dir) => format!("kept in {}", dir.join(provenance::FILENAME).display()),
-                    None => "kept beside this conversation's files, once it has some".to_string(),
+                    Some(dir) => format!("Kept in {}", dir.join(provenance::FILENAME).display()),
+                    None => "Kept beside this conversation's files, once it has some".to_string(),
                 })
                 .muted()
                 .size(ui::Size::Compact),
@@ -813,8 +813,8 @@ impl Workbench {
             // `visited twice · 11s, 6s` — the visits and how long each produced output for.
             let mut note = match node.visits {
                 1 => String::new(),
-                2 => "visited twice".to_string(),
-                visits => format!("visited {visits} times"),
+                2 => "Visited twice".to_string(),
+                visits => format!("Visited {visits} times"),
             };
             let spans: Vec<String> = node.spans.iter().map(|ms| duration_label(*ms)).collect();
             if !spans.is_empty() {
