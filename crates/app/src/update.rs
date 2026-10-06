@@ -1090,7 +1090,7 @@ mod tests {
 
         let unknown = describe(&Standing::Unknown("no network".into()), &packaged);
         assert!(unknown.contains("no network"), "the reason must survive: {unknown}");
-        assert!(unknown.contains("could not check"), "{unknown}");
+        assert!(unknown.contains("Could not check"), "{unknown}");
     }
 
     /// The digest comes off the real payload, and it is the one `v0.3.0` really hashes to.
