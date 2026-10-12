@@ -1099,8 +1099,8 @@ fn decode(bytes: &[u8], wide: bool) -> String {
 /// reliable signal either way — a researcher watched it print success text and still exit
 /// non-zero. The only event this app can see at all is the elevated window closing, so that
 /// is what counts: reaching the `exit 0` below means `Start-Process` got as far as running
-/// the program and waiting for it, and `judge_finished_fix` is what turns that into "restart
-/// your machine" rather than a false "done". A refused UAC prompt never reaches that line —
+/// the program and waiting for it, and `Workbench::finish_successful_fix` is what turns that
+/// into "restart your machine" rather than a false "done". A refused UAC prompt never reaches that line —
 /// `Start-Process` raises a *non-terminating* error there, which under `-Command` would fall
 /// straight through to `exit 0`, so `-ErrorAction Stop` makes it terminating and the `catch`
 /// exits 1.

@@ -1821,6 +1821,38 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
 ///
 /// Attach-only is deliberately *not* in the list: that mode is opt-in and its message
 /// already names its own fix, so a setup pane would be answering a question nobody asked.
+/// One or two plain sentences for a failed Setup fix, shown in place of its log.
+///
+/// Matched on the few failures that have a cause a researcher can act on; anything else gets
+/// a generic sentence, with the full output one click away under "Show details".
+fn failure_summary(check_id: &str, lines: &[String], stopped: bool) -> String {
+    if stopped {
+        return "Stopped before it finished.".into();
+    }
+    let output = lines.join("\n").to_lowercase();
+    let mentions = |markers: &[&str]| markers.iter().any(|marker| output.contains(marker));
+    if mentions(&["canceled by the user", "cancelled by the user", "operation was canceled"])
+        // The elevated WSL install prints nothing here — it runs in a window of its own — and
+        // fails only when the administrator prompt is refused (`preflight::elevated`).
+        || (check_id == "runtime" && lines.is_empty())
+    {
+        "Administrator approval was declined. Press Retry and choose Yes when Windows asks."
+            .into()
+    } else if mentions(&[
+        "could not resolve",
+        "temporary failure in name resolution",
+        "failed to download",
+        "failed to fetch",
+        "connection refused",
+        "network is unreachable",
+        "timed out",
+    ]) {
+        "The download failed. Check your internet connection and try again.".into()
+    } else {
+        "The installer stopped with an error.".into()
+    }
+}
+
 /// Whether a failed turn failed because the chosen model cannot call tools.
 ///
 /// Mini-Me cannot work without tools: the coordinator reaches every specialist through one, and
@@ -2186,10 +2218,15 @@ struct RunningFix {
     /// lines is why a fix that printed nothing showed a box containing one dash instead of
     /// admitting there was nothing to show (docs §60).
     notes: Vec<String>,
-    /// Which check this fix belongs to, so a re-check can tell whether it worked.
+    /// Which check this fix belongs to: the row that shows its progress and its result.
     check_id: &'static str,
+    /// What ran, so Retry can run exactly the same thing again.
+    argv: Vec<String>,
     done: bool,
     ok: bool,
+    /// Whether a failed fix's output is expanded. A successful one never shows it: finishing
+    /// cleanly is the whole verdict, and its log only buries the ✓.
+    show_details: bool,
     /// The way to stop it, for as long as there is a process to stop (docs §172).
     cancel: preflight::Cancel,
     /// Set once Stop has been pressed, so the pane can say *stopping* rather than claiming a
@@ -2200,13 +2237,6 @@ struct RunningFix {
 
 /// How much of a fix's output the pane keeps.
 const FIX_LOG_LINES: usize = 200;
-
-/// One collapsed line for a finished onboarding step, once it is no longer the active row.
-struct OnboardingStepResult {
-    check_id: &'static str,
-    label: String,
-    ok: bool,
-}
 
 /// One editable primitive from an MCP elicitation form.
 struct McpElicitationField {
@@ -2358,33 +2388,29 @@ struct Workbench {
     settings_section: Section,
     report: Option<preflight::Report>,
     checking: bool,
-    /// Set when a fix has just succeeded, so the re-check it triggered is compared against
-    /// the row it was meant to fix. See [`Workbench::judge_finished_fix`].
-    judge_after_recheck: bool,
+    /// A check asked for while one was already in flight. Run once the current one lands,
+    /// rather than dropped: a dropped request left a fix judged against a report started
+    /// before it finished.
+    recheck_pending: bool,
+    /// Rows a fix finished successfully in this Setup session, with the state it left them in.
+    /// A fix exiting cleanly is the proof it worked, so a later report from the dependents'
+    /// check does not overrule it. Cleared when Setup is opened again, which checks for real.
+    locally_done: HashMap<&'static str, (preflight::State, String)>,
+    /// The WSL install finished and only a Windows restart remains. Holds Setup's Get started
+    /// shut, because nothing that depends on the distro can work before the restart.
+    restart_required: bool,
     /// A fix the app is running for the user: what it is, and what it has printed so far.
-    /// `Some` means a command is live, which is what disables the other buttons.
+    /// While it is not `done`, every button that could move on is disabled (`setup_busy`).
     running_fix: Option<RunningFix>,
-    /// Onboarding modal: open flag, and whether the one-button sequence is currently
-    /// walking the check list on its own (as opposed to a person clicking one fix by hand).
     onboarding_open: bool,
-    onboarding_auto_running: bool,
-    /// The `check.id` the auto-run is currently driving, so the body knows which row's
-    /// `running_fix` belongs to it.
-    onboarding_step: Option<&'static str>,
-    /// Set when the auto-run reaches a check that needs the user to act outside the app
-    /// (a `Fix::Manual` or a sign-in link) — paused, not failed.
-    onboarding_awaiting_manual: Option<&'static str>,
-    /// One-line verdicts for steps that already ran and are no longer the active row, so
-    /// their box can collapse instead of keeping every finished step's full log on screen.
-    onboarding_history: Vec<OnboardingStepResult>,
     /// The Get Started key step's "Test key" result: `None` until pressed.
     key_test: Option<KeyTest>,
     /// Which provider and key `key_test` is about, as a fingerprint of the field — never the key
     /// itself. A result is only shown while both still match, so a ✓ for one key cannot sit
     /// under a different key or provider.
     key_tested: Option<(String, u64)>,
-    /// Steps the user chose to skip for this session: the auto-run walks past them. Skipping
-    /// a required one never counts as finishing onboarding, so it comes back next launch.
+    /// Steps the user chose to skip for this session. Skipping a required one never counts as
+    /// finishing onboarding, so it comes back next launch.
     onboarding_skipped: Vec<&'static str>,
     onboarding_focus: gpui::FocusHandle,
     /// A run paused at the approval gate: the command it wants to run, awaiting a
@@ -2912,13 +2938,11 @@ impl Workbench {
             settings_section: Section::default(),
             report: None,
             checking: false,
-            judge_after_recheck: false,
+            recheck_pending: false,
+            locally_done: HashMap::new(),
+            restart_required: false,
             running_fix: None,
             onboarding_open: false,
-            onboarding_auto_running: false,
-            onboarding_step: None,
-            onboarding_awaiting_manual: None,
-            onboarding_history: Vec::new(),
             key_test: None,
             key_tested: None,
             onboarding_skipped: Vec::new(),
@@ -3492,15 +3516,25 @@ impl Workbench {
     /// the Linux keychain client panics if called from a Tokio worker (docs §22).
     fn run_preflight(&mut self, cx: &mut Context<Self>) {
         if self.checking {
+            self.recheck_pending = true;
             return;
         }
         self.checking = true;
         let has_key = settings::secret(&settings::Settings::load().key_name()).is_some();
         let mut results = self.sidecar.preflight(has_key);
         cx.spawn(async move |this, cx| {
-            if let Some(report) = results.next().await {
+            if let Some(mut report) = results.next().await {
                 let _ = this.update(cx, |workbench, cx| {
                     workbench.checking = false;
+                    for check in &mut report.checks {
+                        if let Some((state, detail)) = workbench.locally_done.get(check.id) {
+                            check.state = *state;
+                            check.detail = detail.clone();
+                            if *state == preflight::State::Pass {
+                                check.fixes.clear();
+                            }
+                        }
+                    }
                     // Name the *first* blocker rather than a count: "2 to fix" still
                     // leaves the user opening the pane to find out what.
                     workbench.status = match report.first_problem() {
@@ -3508,25 +3542,21 @@ impl Workbench {
                         None => format!("setup: {}", report.summary()),
                     };
                     let blocked = !report.ready();
-                    workbench.report = Some(report);
                     // A failed fix whose own check now passes is no longer news. Kept, it drew
-                    // "Install Ubuntu — failed" under a green WSL2 runtime row and left the
-                    // primary button on "Retry", offering to repeat an install that the check
-                    // had just shown was working (the elevated install's result is judged by
-                    // its window closing, not by what it did).
-                    if workbench.running_fix.as_ref().is_some_and(|fix| {
-                        fix.done && !fix.ok && !workbench.still_unfixed(fix.check_id)
-                    }) {
-                        workbench.running_fix = None;
+                    // "Install Ubuntu — failed" under a green WSL2 runtime row and offered Retry
+                    // on an install the check had just shown was working (the elevated install's
+                    // result is judged by its window closing, not by what it did).
+                    if let Some(fix) = &workbench.running_fix {
+                        let now_passes = report.checks.iter().any(|check| {
+                            check.id == fix.check_id && check.state == preflight::State::Pass
+                        });
+                        if fix.done && !fix.ok && now_passes {
+                            workbench.running_fix = None;
+                        }
                     }
-                    if std::mem::take(&mut workbench.judge_after_recheck) {
-                        workbench.judge_finished_fix();
-                    }
-                    if workbench.onboarding_auto_running {
-                        // A re-check triggered by the auto-run itself (either the very first
-                        // one, or the one a successful fix always triggers) — advance to the
-                        // next pending step, or land on "Done".
-                        workbench.onboarding_advance(cx);
+                    workbench.report = Some(report);
+                    if std::mem::take(&mut workbench.recheck_pending) {
+                        workbench.run_preflight(cx);
                     } else if !workbench.onboarding_open && blocked {
                         // A first-run report opens the guided pane on its own, same as
                         // always. But so does any later one: a mandatory step (a `Fail`,
@@ -3548,38 +3578,55 @@ impl Workbench {
     /// none, because the whole point is to reflect what the machine is like *now*.
     fn open_onboarding(&mut self, cx: &mut Context<Self>) {
         self.onboarding_open = true;
-        self.onboarding_auto_running = false;
-        self.onboarding_step = None;
-        self.onboarding_awaiting_manual = None;
-        self.onboarding_history.clear();
         self.onboarding_skipped.clear();
+        // A fresh look at the machine: last session's results, and a finished fix's leftover
+        // ✓ or ✗, would otherwise sit over rows this check is about to answer for real.
+        self.locally_done.clear();
+        if self.running_fix.as_ref().is_some_and(|fix| fix.done) {
+            self.running_fix = None;
+        }
         self.run_preflight(cx);
     }
 
-    /// The next check the sequence still has to deal with: failing or warning, and not one
-    /// the user skipped. Shared by the sequencer and the modal's primary button.
-    fn onboarding_next_check(&self) -> Option<&preflight::Check> {
-        self.report.as_ref()?.checks.iter().find(|check| {
-            matches!(check.state, preflight::State::Fail | preflight::State::Warn)
-                && !self.onboarding_skipped.contains(&check.id)
-        })
+    /// Whether Setup has something in flight — a fix running, or a check. While it does, no
+    /// button that could move on or start something else may be pressed: leaving halfway
+    /// through an install is how a setup ends up half-done and failing later for no stated
+    /// reason.
+    fn setup_busy(&self) -> bool {
+        self.checking || self.running_fix.as_ref().is_some_and(|fix| !fix.done)
     }
 
-    /// Bound to a row's "Skip this step": walk past it and carry on with the rest.
+    /// Record a row as finished by the action just taken, without checking it again.
+    fn mark_check_done(
+        &mut self,
+        check_id: &'static str,
+        state: preflight::State,
+        detail: String,
+    ) {
+        if let Some(check) = self
+            .report
+            .as_mut()
+            .and_then(|report| report.checks.iter_mut().find(|check| check.id == check_id))
+        {
+            check.state = state;
+            check.detail = detail.clone();
+            if state == preflight::State::Pass {
+                check.fixes.clear();
+            }
+        }
+        self.locally_done.insert(check_id, (state, detail));
+    }
+
+    /// Bound to the key step's "Skip this step".
     fn skip_onboarding_step(&mut self, check_id: &'static str, cx: &mut Context<Self>) {
         if !self.onboarding_skipped.contains(&check_id) {
             self.onboarding_skipped.push(check_id);
         }
-        if self.onboarding_awaiting_manual == Some(check_id) {
-            self.onboarding_awaiting_manual = None;
-        }
-        self.onboarding_auto_running = true;
-        self.onboarding_advance(cx);
         cx.notify();
     }
 
-    /// Bound to the key step's Save: file the pasted key where every turn reads it, then
-    /// re-check — and resume the sequence if it was paused on this step.
+    /// Bound to the key step's Save: file the pasted key where every turn reads it, and mark
+    /// the step done — storing it was the whole step, so there is nothing left to check.
     fn save_onboarding_key(&mut self, cx: &mut Context<Self>) {
         let value = self.field_text(Field::ApiKey, cx);
         if value.is_empty() {
@@ -3601,11 +3648,12 @@ impl Workbench {
         // rather than on the next Settings save.
         self.sidecar.set_model(model_choice(&stored));
         self.say("API key stored", cx);
-        if self.onboarding_awaiting_manual == Some("model-key") {
-            self.resume_onboarding(cx);
-        } else {
-            self.run_preflight(cx);
-        }
+        self.mark_check_done(
+            "model-key",
+            preflight::State::Pass,
+            "your API key is stored securely on this device".into(),
+        );
+        cx.notify();
     }
 
     /// Show the API key field's placeholder as asterisks when the chosen provider already has a
@@ -3672,119 +3720,6 @@ impl Workbench {
         self.key_tested.as_ref().is_some_and(|(provider, fingerprint)| {
             *provider == self.draft.provider && *fingerprint == key_fingerprint(&typed)
         })
-    }
-
-    /// Bound to the modal's "Get Started" button: begin auto-running every pending check's
-    /// fix in sequence.
-    fn start_onboarding(&mut self, cx: &mut Context<Self>) {
-        self.onboarding_auto_running = true;
-        self.onboarding_advance(cx);
-    }
-
-    /// The one-button sequencer. Finds the next check that still needs work and either runs
-    /// its fix, pauses for the user to act on it by hand, or — if nothing is left — marks
-    /// onboarding complete.
-    ///
-    /// A thin driver on top of `run_preflight`/`start_fix`, not a parallel execution path:
-    /// it is re-entered from the tail of both, so a fix finishing and a re-check resolving
-    /// both funnel back through here.
-    fn onboarding_advance(&mut self, cx: &mut Context<Self>) {
-        if !self.onboarding_auto_running {
-            return;
-        }
-        let Some(report) = &self.report else {
-            // Still checking — `run_preflight`'s completion handler calls back in here.
-            return;
-        };
-        let ready = report.ready();
-        let Some(check) = self.onboarding_next_check().cloned() else {
-            // Nothing left to fix, or only steps the user skipped. A skipped *required* step
-            // means onboarding is not finished, so it is not recorded as such.
-            self.onboarding_auto_running = false;
-            self.onboarding_step = None;
-            if ready {
-                self.mark_onboarded();
-            }
-            return;
-        };
-        // The step we were driving just resolved (successfully, since the auto-run only
-        // ever reaches here again via a successful fix's re-check) — collapse it to a
-        // one-line verdict before moving the spotlight to the next row.
-        if let Some(previous) = self.onboarding_step {
-            if previous != check.id {
-                if let Some(fix) = &self.running_fix {
-                    if fix.check_id == previous && fix.done && fix.ok {
-                        self.onboarding_history.push(OnboardingStepResult {
-                            check_id: previous,
-                            label: fix.label.clone(),
-                            ok: true,
-                        });
-                    }
-                }
-            }
-        }
-        self.onboarding_step = Some(check.id);
-        match check.fixes.first() {
-            None => {
-                // A Fail/Warn with no fix at all — nothing the auto-run can do; stop rather
-                // than spin.
-                self.onboarding_auto_running = false;
-            }
-            Some(preflight::Fix::Run { label, argv, .. }) => {
-                if self.running_fix.as_ref().is_some_and(|fix| !fix.done) {
-                    // Already running (this fix's own success re-check just landed) — wait
-                    // for its callback rather than starting a second command.
-                    return;
-                }
-                // This exact fix already reported success against this exact check, and the
-                // check still isn't passing — `judge_finished_fix` has already explained why
-                // (most often: WSL installed, but Windows needs a restart before the distro
-                // can start). Firing the same command again is not a second attempt, it is a
-                // loop: on a real machine that meant a fresh UAC prompt every few seconds
-                // instead of the restart notice ever reaching the user. Stop and wait for
-                // them instead.
-                if self
-                    .running_fix
-                    .as_ref()
-                    .is_some_and(|fix| fix.check_id == check.id && fix.ok)
-                {
-                    self.onboarding_auto_running = false;
-                    self.onboarding_awaiting_manual = Some(check.id);
-                    return;
-                }
-                self.start_fix(label.to_string(), argv.clone(), check.id, cx);
-            }
-            Some(preflight::Fix::Manual(_)) | Some(preflight::Fix::EnterKey) => {
-                self.onboarding_auto_running = false;
-                self.onboarding_awaiting_manual = Some(check.id);
-            }
-        }
-    }
-
-    /// Bound to "Retry" after a fix fails: re-check, then re-issue the fix only if the step
-    /// still fails.
-    ///
-    /// **Re-checked first, because a fix can fail and still have worked.** The elevated
-    /// `wsl --install -d Ubuntu` is judged by its window closing, not by what it did, and a
-    /// researcher who closed it after Ubuntu's first-launch prompt saw the step stay red over a
-    /// distro that was installed and answering. Retry advanced on that stale report, so it
-    /// re-ran the install, which
-    /// errors on an existing distro in a window this app cannot read: "failed. Nothing to show
-    /// here", on every press, forever. The re-check's completion calls `onboarding_advance`
-    /// (because `onboarding_auto_running` is set), which moves on if the step now passes and
-    /// runs the fix again if it does not.
-    fn retry_onboarding_step(&mut self, cx: &mut Context<Self>) {
-        self.onboarding_auto_running = true;
-        self.run_preflight(cx);
-    }
-
-    /// Bound to "Continue" once the user has done whatever a `Fix::Manual` step
-    /// needed outside the app: re-check, and resume the sequence if that step now passes.
-    fn resume_onboarding(&mut self, cx: &mut Context<Self>) {
-        let awaited = self.onboarding_awaiting_manual;
-        self.onboarding_auto_running = true;
-        self.onboarding_step = awaited;
-        self.run_preflight(cx);
     }
 
     /// Record that onboarding is done — either everything passed, or the user chose to skip
@@ -3994,76 +3929,52 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Whether the named row is still not passing, according to the latest report.
-    fn still_unfixed(&self, check_id: &str) -> bool {
-        self.report.as_ref().is_some_and(|report| {
-            report
-                .checks
-                .iter()
-                .any(|check| check.id == check_id && check.state != preflight::State::Pass)
-        })
-    }
-
     /// What colour the app's own remarks about a fix should be.
-    ///
-    /// Read from the current report rather than stored, so "restart Windows" is amber while
-    /// it is still true and goes quiet by itself once the row it names turns green.
     fn fix_tone(&self, fix: &RunningFix) -> u32 {
-        if !fix.done {
-            theme::text_muted()
-        } else if !fix.ok {
+        if fix.done && !fix.ok {
             theme::error()
-        } else if self.still_unfixed(fix.check_id) {
-            theme::warning()
         } else {
             theme::text_muted()
         }
     }
 
-    /// Say so when a fix reported success and changed nothing.
-    ///
-    /// A machine with WSL but no distro ran `wsl --install -d Ubuntu`, which installed the
-    /// WSL runtime, exited 0 — and left the distro unregistered until Windows restarts. The
-    /// pane said "Install Ubuntu — done" directly above the same red row it had started
-    /// from, which reads as a bug in the app rather than as a step the user still has to
-    /// take (docs §60).
-    ///
-    /// The verdict is drawn from the re-check, never from the command's own words: `wsl.exe`
-    /// speaks the system language — the machine this came from printed *"Descargando:
-    /// Subsistema de Windows para Linux"* — so matching on "restart" would have failed for
-    /// exactly the user who needed it.
-    fn judge_finished_fix(&mut self) {
-        let check_id = match &self.running_fix {
-            Some(fix) if fix.ok => fix.check_id,
-            _ => return,
-        };
-        if !self.still_unfixed(check_id) {
-            return;
-        }
-        let Some(fix) = self.running_fix.as_mut() else {
+    /// Run the same fix again for the row whose last attempt failed.
+    fn retry_fix(&mut self, check_id: &'static str, cx: &mut Context<Self>) {
+        let Some(fix) = self
+            .running_fix
+            .as_ref()
+            .filter(|fix| fix.check_id == check_id && fix.done)
+        else {
             return;
         };
-        // Only the runtime row installs WSL itself, and only Windows reboots for it.
+        let (label, argv) = (fix.label.clone(), fix.argv.clone());
+        self.start_fix(label, argv, check_id, cx);
+    }
+
+    /// Mark the row a fix was for as done, from the fix's own success.
+    fn finish_successful_fix(&mut self, check_id: &'static str, cx: &mut Context<Self>) {
         if check_id == "runtime" && cfg!(windows) {
-            fix.notes.push(
-                "— That installed WSL, but Windows has to restart before a distro can \
-                 start. Restart this machine, open the app again, and this row should be \
-                 green."
-                    .into(),
-            );
+            // `wsl --install` exits 0 with the distro still unregistered until Windows
+            // restarts, so the row cannot honestly be green yet (docs §60).
+            self.restart_required = true;
         } else {
-            fix.notes.push(
-                "— It reported success but the check still fails. The output above is the \
-                 best clue; the sidecar log below has the rest."
-                    .into(),
-            );
+            self.mark_check_done(check_id, preflight::State::Pass, "Installed".into());
+        }
+        // A backend set up (or updated) after launch has nothing running it: the launch-time
+        // start already failed on the missing folder. Started here, without the re-check a
+        // restart normally ends with.
+        if matches!(check_id, "checkout" | "backend-build") {
+            self.restart_backend_with(false, cx);
+        }
+        // Rows skipped because this one was missing have never been checked at all.
+        let unchecked = self.report.as_ref().is_some_and(|report| {
+            report.checks.iter().any(|check| check.state == preflight::State::Skip)
+        });
+        if unchecked && !self.restart_required {
+            self.run_preflight(cx);
         }
     }
 
-    /// Run a fix on the user's behalf, streaming its output into the pane.
-    ///
-    /// Re-checks automatically when it finishes, so a successful install turns its own
-    /// row green without the user having to work out that they should press Re-check.
     /// Stop the repair that is running, if one is.
     ///
     /// **Says `stopping`, not `stopped`.** The only honest report of a stop is the command
@@ -4094,6 +4005,13 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Run a fix on the user's behalf, streaming its output into its row.
+    ///
+    /// **A clean exit is the verdict.** A fix that finishes successfully marks its own row done
+    /// and nothing is checked again; re-checking after every install was slow, briefly showed
+    /// other rows in a misleading state, and judged success by a second, racier probe. Rows that
+    /// were *never* checked because this one was missing (`State::Skip`) are the exception:
+    /// they are checked now, for the first time.
     fn start_fix(
         &mut self,
         label: String,
@@ -4105,15 +4023,17 @@ impl Workbench {
             return;
         }
         self.status = format!("running: {label}");
-        let (events, cancel) = self.sidecar.run_fix(argv);
+        let (events, cancel) = self.sidecar.run_fix(argv.clone());
         self.running_fix = Some(RunningFix {
             label,
             link: None,
             lines: Vec::new(),
             notes: Vec::new(),
             check_id,
+            argv,
             done: false,
             ok: false,
+            show_details: false,
             cancel: cancel.clone(),
             stopping: false,
         });
@@ -4148,38 +4068,10 @@ impl Workbench {
                             fix.done = true;
                             fix.ok = ok;
                             fix.notes.push(format!("— {note}"));
-                            // Credentials are read into the backend's environment when it
-                            // *starts*, so signing in while it runs changes nothing until
-                            // it is restarted. Saying so is the difference between a fix
-                            // that works and one that looks broken — signing in from this
-                            // pane and then watching the same failure is exactly what
-                            // happened the first time (docs §32).
-                            if ok && fix.label.contains("Sign in") {
-                                fix.notes.push(
-                                    "— Close and reopen the app: the backend reads your \
-                                     Asta sign-in when it starts."
-                                        .into(),
-                                );
-                            }
                             workbench.status =
                                 format!("{}: {note}", if ok { "done" } else { "failed" });
-                            // Re-check on success so the row the user just fixed goes
-                            // green by itself — and so that a fix which succeeded without
-                            // fixing anything gets found out. See `judge_finished_fix`.
                             if ok {
-                                workbench.judge_after_recheck = true;
-                                workbench.run_preflight(cx);
-                                // A backend set up (or updated) after launch has nothing
-                                // running it: the launch-time start already failed on the
-                                // missing folder. Start it now instead of leaving that to a
-                                // Restart button nobody knows to press.
-                                if matches!(check_id, "checkout" | "backend-build") {
-                                    workbench.restart_backend(cx);
-                                }
-                            } else if workbench.onboarding_auto_running {
-                                // Stop the sequence here — the log stays up as-is, and the
-                                // modal's primary button switches to "Retry".
-                                workbench.onboarding_auto_running = false;
+                                workbench.finish_successful_fix(check_id, cx);
                             }
                         }
                     }
@@ -4457,6 +4349,13 @@ impl Workbench {
     }
 
     fn restart_backend(&mut self, cx: &mut Context<Self>) {
+        self.restart_backend_with(true, cx);
+    }
+
+    /// `recheck` is false when Setup restarts the backend after its own successful fix: that
+    /// fix already decided its row, and a re-check would undo the "no re-check" rule of
+    /// [`Workbench::start_fix`].
+    fn restart_backend_with(&mut self, recheck: bool, cx: &mut Context<Self>) {
         if self.streaming {
             self.say("can't restart the backend mid-turn", cx);
             return;
@@ -4499,7 +4398,9 @@ impl Workbench {
                 // the specialist list the backend writes as it assembles a coordinator.
                 workbench.conversations_loaded = false;
                 workbench.refresh_conversations(cx);
-                workbench.run_preflight(cx);
+                if recheck {
+                    workbench.run_preflight(cx);
+                }
                 // **And ask again which research services answered.** `unavailable_mcps` was
                 // written only by `warm_up`, which runs once at startup, so a restart left the
                 // notice reporting whatever had been true when the app opened. A researcher who
@@ -11073,6 +10974,30 @@ mod tests {
         ] {
             assert!(!looks_like_a_setup_failure(message), "{message}");
         }
+    }
+
+    #[test]
+    fn a_failed_setup_fix_is_explained_in_a_sentence_not_a_log() {
+        let lines = |text: &[&str]| text.iter().map(|line| line.to_string()).collect::<Vec<_>>();
+        assert!(failure_summary("asta", &[], true).starts_with("Stopped"));
+        // The elevated WSL install runs in its own window and prints nothing here.
+        assert!(failure_summary("runtime", &[], false).contains("Administrator approval"));
+        assert!(failure_summary(
+            "asta",
+            &lines(&["error: Failed to fetch: `https://github.com/allenai/asta-plugins.git`"]),
+            false,
+        )
+        .contains("internet connection"));
+        assert!(failure_summary(
+            "dependencies",
+            &lines(&["curl: (6) Could not resolve host: pypi.org"]),
+            false,
+        )
+        .contains("download failed"));
+        assert_eq!(
+            failure_summary("checkout", &lines(&["something nobody planned for"]), false),
+            "The installer stopped with an error."
+        );
     }
 
     #[test]
