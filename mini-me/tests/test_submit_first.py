@@ -135,6 +135,7 @@ def test_the_gates_are_attached_to_exactly_the_two_subagents():
         diagnostic_tools=[],
         theory_tools=[],
         discovery_tools=[],
+        validation_tools=[],
         file_sync=object(),
         sandbox_backend=Sandbox(),
         model_resolver=Resolver(),

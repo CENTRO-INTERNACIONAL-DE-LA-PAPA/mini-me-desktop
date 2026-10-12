@@ -14,6 +14,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Profile a tabular dataset with pointblank DataScan.")
     parser.add_argument("input_path", help="Path to the input table.")
     parser.add_argument("--output", required=True, help="Path to write the profile JSON report.")
+    parser.add_argument("--html", help="Path to write Pointblank's HTML profile report.")
     parser.add_argument("--table-name", help="Optional logical table name for reports.")
     parser.add_argument("--sheet-name", help="Excel sheet name or zero-based index.")
     parser.add_argument(
@@ -59,6 +60,10 @@ def main() -> None:
         "datascan_report": json.loads(scan.to_json()),
     }
     write_json(report, args.output)
+    if args.html:
+        html_path = Path(args.html)
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(scan.get_tabular_report().as_raw_html(), encoding="utf-8")
     print(f"Wrote dataset profile to {args.output}")
 
 

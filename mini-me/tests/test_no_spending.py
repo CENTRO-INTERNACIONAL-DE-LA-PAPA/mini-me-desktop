@@ -150,6 +150,7 @@ def test_the_guard_is_attached_to_the_coordinator_and_every_subagent():
         diagnostic_tools=[],
         theory_tools=[],
         discovery_tools=[],
+        validation_tools=[],
         file_sync=object(),
         sandbox_backend=Sandbox(),
         model_resolver=Resolver(),

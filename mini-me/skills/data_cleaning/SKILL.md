@@ -24,7 +24,7 @@ before downstream analysis or modeling.
 
 1. Profile the dataset structure and missingness patterns.
 2. Validate schema, types, keys, and expected domains.
-3. Measure data quality issues with pointblank and pandas.
+3. Measure data quality issues with Pointblank: the `profile_dataset` and `validate_dataset` tools.
 4. Use AGROVOC and CropOntology MCP tools only when semantic harmonization is needed.
 5. Apply cleaning steps with pandas.
 6. Re-run validation checks on the cleaned output.
@@ -32,7 +32,13 @@ before downstream analysis or modeling.
 
 ## Preferred execution path
 
-Use the bundled scripts as the default workflow:
+Pointblank is the validation engine. Use the `profile_dataset` and `validate_dataset` tools first:
+they run the scripts below, save JSON and Pointblank's HTML reports under `validation/` in the
+conversation folder, and return every check's result. Validate each dataset before reporting on
+it and again after cleaning. The answer includes a table of every returned check
+(Check | Column | Passed | Failed | Result) and names the HTML report the researcher can open.
+
+The bundled scripts, for anything the tools do not cover:
 
 - `scripts/profile_dataset.py`: create a pointblank `DataScan` profile plus missingness and duplicate summaries.
 - `scripts/validate_dataset.py`: run pointblank validations from a rules file or from common CLI checks such as non-null keys and distinct keys.

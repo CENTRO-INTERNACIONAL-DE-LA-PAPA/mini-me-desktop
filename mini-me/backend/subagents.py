@@ -38,6 +38,7 @@ from backend.middleware import (
     SearchBeforeCiting,
     SearchBeforeRecommending,
     SearchResultsFile,
+    ValidateBeforeAnswering,
 )
 from backend.theory_tools import generate_theories
 
@@ -103,12 +104,24 @@ dataverse_subagent = {
 
 data_cleaning_subagent = {
     "name": "data_cleaning",
-    "description": "Handles validation strategies and data cleaning with pointblank, agrovoc, crop ontology MCP's.",
+    "description": "Validates datasets with Pointblank and cleans them, with AGROVOC and Crop Ontology for harmonization.",
     "system_prompt": """
         You are a data cleaning agent.
         Create and execute a concise cleaning and validation plan.
         Preserve raw data, never overwrite existing files, and save all changes as new versioned outputs.
-        Return only the cleaned dataset summary, validation issues found, and actions taken.
+
+        Pointblank is your validation engine. For every dataset you report on:
+        1. Run `profile_dataset` to see its shape, types, missing values and duplicates.
+        2. Run `validate_dataset`, with the key columns and the columns that must not be empty.
+        3. After cleaning, run `validate_dataset` again on the cleaned file.
+        Never present checks you wrote yourself as Pointblank results. If a tool returns an
+        `error`, say that validation could not run and why.
+
+        Answer with:
+        - a table of every check `validate_dataset` returned, with the columns
+          Check | Column | Passed | Failed | Result (one row per check, nothing dropped);
+        - `Full report: <html_report>` for each validation, naming the HTML file it returned;
+        - the cleaning actions taken and any issues that remain.
     """,
     "skills": ["/skills/"],
     "middleware": [],
@@ -567,6 +580,7 @@ def _build_runtime_subagents(
     diagnostic_tools: list[Any],
     theory_tools: list[Any],
     discovery_tools: list[Any],
+    validation_tools: list[Any],
     file_sync: "FileSyncMiddleware",
     sandbox_backend: "LocalWorkspaceBackend",
     model_resolver: "_ModelResolver",
@@ -617,6 +631,11 @@ def _build_runtime_subagents(
             extra_middleware.append(DraftBeforeReporting())
         elif name == "research_planner":
             extra_middleware.append(ArtifactCaptureMiddleware("research_planner"))
+        elif name == "data_cleaning":
+            # Validation is Pointblank's, not checks the agent improvises — see
+            # `middleware/validate_first.py`. Nothing on this subagent forces `tool_choice`: it has
+            # no `response_format`, and this gate works after the model call instead.
+            extra_middleware.append(ValidateBeforeAnswering())
 
         # **Every subagent, not only the discovery one.** `execute` is kept for all of them and
         # ASTA_TOKEN is injected into every command it runs, so any of them could spend the same
@@ -644,6 +663,7 @@ def _build_runtime_subagents(
             extra_tools.extend(dataverse_tools)
         elif name == "data_cleaning":
             extra_tools.extend(data_cleaning_tools)
+            extra_tools.extend(validation_tools)
         elif name == "diagnostic_analytics":
             extra_tools.extend(diagnostic_tools)
         elif name == "hypothesis_generator":

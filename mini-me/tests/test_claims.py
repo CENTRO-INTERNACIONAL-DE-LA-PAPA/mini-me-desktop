@@ -430,6 +430,7 @@ def test_the_recorder_is_attached_to_every_subagent_that_returns_a_schema():
         diagnostic_tools=[],
         theory_tools=[],
         discovery_tools=[],
+        validation_tools=[],
         file_sync=object(),
         sandbox_backend=FakeSandbox(),
         model_resolver=Resolver(),

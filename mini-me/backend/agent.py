@@ -55,6 +55,7 @@ from backend.autodiscovery_tools import draft_discovery_run
 from backend.prompts import COORDINATOR_SYSTEM_PROMPT
 from backend.subagents import _build_runtime_subagents, request_diagnostic_context
 from backend.paper_tools import find_papers
+from backend.validation_tools import profile_dataset, validate_dataset
 from backend.pdf_tools import read_pdf
 from backend.theory_tools import generate_theories
 
@@ -180,6 +181,7 @@ async def agent(config: RunnableConfig):
         diagnostic_tools=[request_diagnostic_context],
         theory_tools=[generate_theories],
         discovery_tools=[draft_discovery_run],
+        validation_tools=[profile_dataset, validate_dataset],
         file_sync=file_sync,
         sandbox_backend=sandbox_backend,
         model_resolver=model_resolver,

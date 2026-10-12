@@ -24,6 +24,7 @@ from backend.middleware.guardrails import (
 from backend.middleware.project import ProjectSpineMiddleware
 from backend.middleware.search_first import KeepSources, SearchBeforeCiting
 from backend.middleware.tool_gate import Step, ToolsBeforeAnswering
+from backend.middleware.validate_first import ValidateBeforeAnswering
 from backend.middleware.sync import (
     FileSyncMiddleware,
     SandboxSyncMiddleware,
@@ -46,6 +47,7 @@ __all__ = [
     "SandboxSyncMiddleware",
     "Step",
     "ToolsBeforeAnswering",
+    "ValidateBeforeAnswering",
     "_collect_sandbox_files",
     "_build_filesystem_permissions",
     "_build_pii_middleware",
