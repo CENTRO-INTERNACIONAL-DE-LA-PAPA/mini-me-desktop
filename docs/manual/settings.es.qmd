@@ -25,6 +25,10 @@ En **GET MORE** puedes explorar e **instalar** temas adicionales.
 
 Esta página controla **qué IA** responde tus preguntas, y sus claves.
 
+Una instalación nueva empieza con **Gemini 3.7 Flash a través de OpenRouter** (Provider
+*Custom*, modelo `google/gemini-3.7-flash`, Base URL `https://openrouter.ai/api/v1`), así que
+solo necesita una clave de OpenRouter.
+
 - **Provider** (proveedor): la compañía de IA: Anthropic, OpenAI, Google, Mistral o *Custom
   (OpenAI-compatible)*.
 - **Model** (modelo): cuál de los modelos de esa compañía usar. Elige uno de la lista, o
