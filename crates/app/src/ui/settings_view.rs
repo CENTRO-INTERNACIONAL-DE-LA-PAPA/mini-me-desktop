@@ -145,6 +145,8 @@ impl Workbench {
                     })
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         workbench.set_field(Field::ModelId, &model, cx);
+                        let provider = workbench.draft.provider.clone();
+                        workbench.check_model(provider, model.clone(), false, cx);
                         cx.notify();
                     })),
             );
@@ -616,6 +618,12 @@ impl Workbench {
                 .get(&specialist.name)
                 .map(|spec| spec.rsplit("::").next().unwrap_or(spec).to_string())
                 .unwrap_or_else(|| "Use default".to_string());
+            let check = self
+                .draft
+                .subagents
+                .get(&specialist.name)
+                .and_then(|spec| spec.split_once("::"))
+                .and_then(|(provider, model)| self.model_check_line(provider, model));
             rows = rows.child(ui::setting_row(
                 specialist.name.clone(),
                 specialist.description.clone(),
@@ -628,8 +636,47 @@ impl Workbench {
                     workbench.toggle_picker(Picker::Subagent(index), event.position(), cx);
                 })),
             ));
+            // Only when it is news: a ✓ under every specialist would bury the one that is not.
+            if let Some((colour, line)) =
+                check.filter(|(colour, _)| *colour != theme::text_muted())
+            {
+                rows = rows.child(ui::Label::new(line).colour(colour).size(ui::Size::Compact));
+            }
         }
         rows
+    }
+
+    /// Under the coordinator's model: what checking it found, and a button to check again.
+    fn model_check_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.field_text_or(Field::ModelId, &self.draft.model_id, cx);
+        let line = self.model_check_line(&self.draft.provider, &model);
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .child(
+                div().flex_grow().min_w_0().children(line.map(|(colour, line)| {
+                    ui::Label::new(line).colour(colour).size(ui::Size::Compact)
+                })),
+            )
+            .child(
+                div().flex_none().child(
+                    ui::Button::new("check-model")
+                        .text("Check model")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            let model = workbench.field_text_or(
+                                Field::ModelId,
+                                &workbench.draft.model_id,
+                                cx,
+                            );
+                            let provider = workbench.draft.provider.clone();
+                            workbench.check_model(provider, model, true, cx);
+                        })),
+                ),
+            )
     }
 }
 
@@ -764,6 +811,9 @@ impl Workbench {
                                 .subagents
                                 .insert(picked.clone(), value.clone());
                             workbench.open_picker = None;
+                            if let Some((provider, model)) = value.split_once("::") {
+                                workbench.check_model(provider.to_string(), model.to_string(), false, cx);
+                            }
                             cx.notify();
                         })),
                 );
@@ -830,6 +880,7 @@ impl Workbench {
                         }),
                     ),
             ));
+            pane = pane.child(self.model_check_row(cx));
             pane = pane.child(self.subagent_models(cx));
         }
 

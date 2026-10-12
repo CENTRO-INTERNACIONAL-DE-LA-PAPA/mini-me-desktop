@@ -41,6 +41,24 @@ Esta página controla **qué IA** responde tus preguntas, y sus claves.
 
 ![Agregar una clave de API](images/settings-keys.png)
 
+### ¿Es compatible este modelo? {#model-check}
+
+Cuando eliges un modelo (para todo Mini-Me o para un especialista), Mini-Me le envía una pequeña
+solicitud de prueba y muestra el resultado debajo. **Check model** vuelve a hacer la prueba.
+
+- **✓ Works with every specialist** (funciona con todos los especialistas): no hay que hacer
+  nada.
+- **⚠ Funciona, pero algunos especialistas pueden fallar**: el modelo puede usar herramientas,
+  pero se niega a que se le indique usar una en particular. Algunos especialistas lo necesitan
+  (por ejemplo Academic Research), así que pueden fallar con este modelo. El mensaje sugiere
+  modelos que funcionan por completo.
+- **✗ No se puede usar con Mini-Me**: el modelo no puede usar herramientas. Elige otro.
+- **Couldn't check this model** (no se pudo comprobar): por ejemplo, todavía no hay una clave
+  guardada o no hay conexión. No se bloquea nada; el modelo se puede guardar igual.
+
+La prueba cuesta unos pocos tokens, mucho menos de un centavo, y su resultado se recuerda, así
+que no se repite cada vez que abres la configuración.
+
 ::: {.callout-note}
 Las claves se guardan en el **Administrador de credenciales de Windows**, nunca en un archivo
 normal, y no se vuelven a mostrar después de guardarlas. Usar el modelo de una compañía se

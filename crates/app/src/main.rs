@@ -1841,6 +1841,30 @@ fn asta_sign_in_result(output: &str) -> (preflight::State, String) {
     }
 }
 
+/// What Settings says about a model's tool support: a colour and at most three sentences.
+fn tool_support_message(support: &catalogue::ToolSupport) -> (u32, String) {
+    match support {
+        catalogue::ToolSupport::Full => {
+            (theme::text_muted(), "✓ Works with every specialist.".to_string())
+        }
+        catalogue::ToolSupport::Partial => (
+            theme::warning(),
+            format!(
+                "⚠ This model can use tools but refuses to be required to call one, so Academic                  Research, PDF Librarian, Hypothesis Generator and other specialists that must                  search or run a step first may fail. Models that work fully: {}.",
+                catalogue::KNOWN_GOOD.join(", ")
+            ),
+        ),
+        catalogue::ToolSupport::None => (
+            theme::error(),
+            "✗ This model can't use tools, so Mini-Me can't work with it. Choose another model."
+                .to_string(),
+        ),
+        catalogue::ToolSupport::Unknown(reason) => {
+            (theme::text_muted(), format!("Couldn't check this model: {reason}."))
+        }
+    }
+}
+
 /// One or two plain sentences for a failed Setup fix, shown in place of its log.
 ///
 /// Matched on the few failures that have a cause a researcher can act on; anything else gets
@@ -1879,26 +1903,26 @@ fn failure_summary(check_id: &str, lines: &[String], stopped: bool, timed_out: b
 /// Whether a failed turn failed because the chosen model cannot call tools.
 ///
 /// Mini-Me cannot work without tools: the coordinator reaches every specialist through one, and
-/// they search, read files and run code through theirs. Providers word the refusal differently —
-/// OpenRouter answers 404 *"No endpoints found that support tool use"*, Ollama-style servers
-/// *"… does not support tools"*, others name function calling — so the check is a short list of
-/// phrasings, compared case-insensitively.
+/// they search, read files and run code through theirs. The phrasings are matched in
+/// [`catalogue::model_cannot_use_tools`], which the Settings check shares.
 fn model_cannot_use_tools(message: &str) -> bool {
-    const MARKERS: [&str; 7] = [
-        "support tool use",
-        "does not support tools",
-        "do not support tools",
-        "tools are not supported",
-        "tool use is not supported",
-        "does not support function calling",
-        "function calling is not supported",
-    ];
-    let message = message.to_lowercase();
-    MARKERS.iter().any(|marker| message.contains(marker))
+    catalogue::model_cannot_use_tools(message)
+}
+
+/// Whether a failed turn failed because the model refused to be *required* to call a tool.
+///
+/// Such a model calls tools when it chooses to, so the coordinator works; it fails at the first
+/// specialist that must search or run a step before answering, or that returns a structured
+/// answer. Before this was recognised it surfaced as "Internal error".
+fn model_refuses_forced_tools(message: &str) -> bool {
+    catalogue::model_refuses_forced_tools(message)
 }
 
 /// What the researcher reads in the conversation when [`model_cannot_use_tools`] matched.
 const NO_TOOLS_REPLY: &str = "This model can't use tools, and Mini-Me needs them to search, read files, run code and call its specialists. Choose a different model in **Settings → Model** (Ctrl+,) and ask again. If you set a model for a specific specialist, check that one too.";
+
+/// What the researcher reads in the conversation when [`model_refuses_forced_tools`] matched.
+const FORCED_TOOLS_REPLY: &str = "This model can use tools but refuses to be required to call one, which some specialists need (for example Academic Research, PDF Librarian and Hypothesis Generator). Choose another model in **Settings → Model** (Ctrl+,), for example Claude Sonnet 4.5 or GPT-5.4 mini, and ask again. Settings → Model also checks each model you pick.";
 
 fn looks_like_a_setup_failure(message: &str) -> bool {
     const MARKERS: [&str; 5] = [
@@ -2679,6 +2703,12 @@ struct Workbench {
     /// What each provider last said it offers — see [`catalogue`]. Read from disk at launch and
     /// replaced in place when a refresh lands, so the picker never blocks on the network.
     catalogue: catalogue::Catalogue,
+    /// What Settings → Model found when it asked each model to call a tool, keyed by
+    /// [`catalogue::model_check_key`]. Definitive answers are also on disk, so a model is not
+    /// checked again on every visit.
+    model_checks: HashMap<String, catalogue::ToolSupport>,
+    /// Checks in flight, by the same key, so one model is never asked twice at once.
+    model_checks_running: HashSet<String>,
     /// Whose key the API-key field is about to set.
     ///
     /// **Separate from the coordinator's provider on purpose.** A specialist may run on a second
@@ -3043,6 +3073,11 @@ impl Workbench {
             confirming_delete: None,
             confirming_provider: None,
             catalogue: catalogue::load(),
+            model_checks: catalogue::load_model_checks()
+                .into_iter()
+                .map(|(key, check)| (key, check.support))
+                .collect(),
+            model_checks_running: HashSet::new(),
             key_target: stored.provider.clone(),
             sources_open: false,
             datasets_open: false,
@@ -3749,6 +3784,85 @@ impl Workbench {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Ask `model` (at `provider`) to call one tool, and remember what that shows.
+    ///
+    /// Run when a model is picked, for the coordinator or a specialist, and from "Check model"
+    /// (`force`). Informs only: nothing is blocked on the answer.
+    fn check_model(
+        &mut self,
+        provider: String,
+        model: String,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let model = model.trim().to_string();
+        if model.is_empty() {
+            return;
+        }
+        let base_url = self.draft.base_url.clone();
+        let key = catalogue::model_check_key(&provider, &base_url, &model);
+        if self.model_checks_running.contains(&key)
+            || (!force && self.model_checks.get(&key).is_some_and(|known| known.is_definitive()))
+        {
+            return;
+        }
+        // Read here, on the main thread — the keychain is not safe to touch from a Tokio worker.
+        let Some(api_key) = settings::secret(&format!("llm:{provider}")) else {
+            self.model_checks.insert(
+                key,
+                catalogue::ToolSupport::Unknown("add an API key for this provider first".into()),
+            );
+            cx.notify();
+            return;
+        };
+        self.model_checks_running.insert(key.clone());
+        let mut done = self.sidecar.check_model_tools(provider, base_url, api_key, model);
+        cx.spawn(async move |this, cx| {
+            let support = done.next().await.unwrap_or_else(|| {
+                catalogue::ToolSupport::Unknown("the check did not answer".into())
+            });
+            let _ = this.update(cx, |workbench, cx| {
+                workbench.model_checks_running.remove(&key);
+                workbench.model_checks.insert(key, support);
+                workbench.save_model_checks();
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Write the definitive checks to disk. Failing to is not worth interrupting anyone for:
+    /// the cost is one more check next time.
+    fn save_model_checks(&self) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let mut stored = catalogue::load_model_checks();
+        for (key, support) in &self.model_checks {
+            if support.is_definitive() && !stored.get(key).is_some_and(|known| &known.support == support) {
+                stored.insert(
+                    key.clone(),
+                    catalogue::ModelCheck { support: support.clone(), checked_ms: now_ms },
+                );
+            }
+        }
+        if let Err(error) = catalogue::save_model_checks(&stored) {
+            tracing::warn!(%error, "could not remember the model checks");
+        }
+    }
+
+    /// The result of [`Workbench::check_model`] for `model` at `provider`, as a line to show.
+    /// `None` until a check has started.
+    fn model_check_line(&self, provider: &str, model: &str) -> Option<(u32, String)> {
+        let key = catalogue::model_check_key(provider, &self.draft.base_url, model.trim());
+        if self.model_checks_running.contains(&key) {
+            return Some((theme::text_muted(), "Checking this model…".to_string()));
+        }
+        self.model_checks.get(&key).map(tool_support_message)
     }
 
     /// Whether the "Test key" result still describes what is on screen: same provider, same text
@@ -4789,18 +4903,32 @@ impl Workbench {
                 // call tools fails on the first request, so the turn has no answer at all and the
                 // red line held a provider's raw error and a log path. The question gets a reply
                 // saying what to change instead; the raw error stays in the log.
-                if model_cannot_use_tools(&message) {
+                // Checked before `model_cannot_use_tools`: both mention tools, and only this one
+                // names `tool_choice`.
+                let explained = if model_refuses_forced_tools(&message) {
+                    tracing::warn!(%message, "the model refuses to be required to call a tool");
+                    Some((
+                        FORCED_TOOLS_REPLY,
+                        "this model can't be required to call a tool — choose another in Settings",
+                    ))
+                } else if model_cannot_use_tools(&message) {
                     tracing::warn!(%message, "the model cannot use tools");
+                    Some((
+                        NO_TOOLS_REPLY,
+                        "this model can't use tools — choose another in Settings",
+                    ))
+                } else {
+                    None
+                };
+                if let Some((reply, status)) = explained {
                     match self.transcript.last_mut() {
                         Some(last) if last.role == "mini-me" && last.body.is_empty() => {
-                            last.push_body(NO_TOOLS_REPLY);
+                            last.push_body(reply);
                         }
-                        _ => self
-                            .transcript
-                            .push(Message::new("mini-me", NO_TOOLS_REPLY.to_string())),
+                        _ => self.transcript.push(Message::new("mini-me", reply.to_string())),
                     }
                     self.finish_turn(cx);
-                    self.status = "this model can't use tools — choose another in Settings".into();
+                    self.status = status.into();
                     self.error = None;
                     return;
                 }
@@ -7216,6 +7344,15 @@ impl Workbench {
         // request. The port and execution locality are baked into the launch command, so
         // those need a restart — say so rather than letting the user wonder.
         self.sidecar.set_model(model_choice(&self.draft));
+        // A typed model id reaches the check here, the first moment it is final; a picked one
+        // was checked on the click and is remembered, so this costs nothing twice. Specialists
+        // too: a key saved just now may be what lets their check run at all.
+        self.check_model(self.draft.provider.clone(), self.draft.model_id.clone(), false, cx);
+        for spec in self.draft.subagents.values().cloned().collect::<Vec<_>>() {
+            if let Some((provider, model)) = spec.split_once("::") {
+                self.check_model(provider.to_string(), model.to_string(), false, cx);
+            }
+        }
         let mut note = String::from("Saved.");
         if !stored.is_empty() {
             note.push_str(&format!(" Stored: {}.", stored.join(", ")));
@@ -11112,6 +11249,21 @@ mod tests {
         assert!(detail.contains("can't generate research theories"), "{detail}");
 
         assert_eq!(asta_sign_in_result("").1, "Signed in");
+    }
+
+    #[test]
+    fn a_model_that_refuses_a_required_tool_is_explained_not_called_an_internal_error() {
+        // The turn error from 2026-10-12, Claude Sonnet 5.5 through OpenRouter.
+        let message = "Error code: 400 - {'error': {'message': 'Provider returned error', 'code': \
+                       400, 'metadata': {'raw': '{\"message\":\"tool_choice: type \\\"tool\\\" and \
+                       \\\"any\\\" are not supported for this model.\"}', 'provider_name': 'Amazon \
+                       Bedrock'}}}";
+        assert!(model_refuses_forced_tools(message));
+        assert!(!model_cannot_use_tools(message));
+        // And the other way round: a model with no tools at all is not this case.
+        assert!(!model_refuses_forced_tools(
+            "Error code: 404 - No endpoints found that support tool use."
+        ));
     }
 
     #[test]

@@ -285,6 +285,265 @@ pub async fn test_key(
     }
 }
 
+// ------------------------------------------------------------ does the model work with tools?
+//
+// **Why a live request and not the listing.** On 2026-10-12 OpenRouter's `supported_parameters`
+// listed `tools` and `tool_choice` for Claude Sonnet 5.5 and Opus 5.5 exactly as for Claude
+// Sonnet 4.5 and GPT-5.4 mini, yet the first two refuse to be *required* to call a tool
+// (HTTP 400 "tool_choice: type "tool" and "any" are not supported for this model"). Mini-Me
+// requires one wherever a specialist must search or run a step before it answers, and wherever
+// a specialist returns a structured answer, so on those models such specialists fail and the
+// researcher saw only "Internal error". The listing cannot tell these apart; one tiny request
+// that requires a tool call can.
+
+/// How well a model works with the tools Mini-Me's specialists use.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", content = "reason", rename_all = "lowercase")]
+pub enum ToolSupport {
+    /// Calls tools, including when required to call a specific one.
+    Full,
+    /// Calls tools, but refuses to be required to call one.
+    Partial,
+    /// Cannot call tools at all.
+    None,
+    /// The check could not run or could not tell; the reason is for the researcher.
+    Unknown(String),
+}
+
+impl ToolSupport {
+    /// Whether this is an answer about the model rather than about the check, and so worth
+    /// remembering. "No key yet" or "offline" must be asked again next time.
+    pub fn is_definitive(&self) -> bool {
+        !matches!(self, ToolSupport::Unknown(_))
+    }
+}
+
+/// Models seen working with every specialist, named in the warning so a researcher has
+/// somewhere to go. Short on purpose; extend it as models are confirmed.
+pub const KNOWN_GOOD: [&str; 2] = ["Claude Sonnet 4.5", "GPT-5.4 mini"];
+
+/// Enough for a reasoning model to think briefly and still call the tool; far below a cent.
+const PROBE_MAX_TOKENS: u64 = 512;
+
+/// The request that asks `model` to call one specific tool, or `None` for a provider whose
+/// chat API this app does not speak. Pure, so each provider's shape is pinned by a test.
+pub fn probe_request(
+    provider: &str,
+    base_url: &str,
+    model: &str,
+) -> Option<(String, serde_json::Value)> {
+    const PROMPT: &str = "Call the ping tool.";
+    let parameters = serde_json::json!({
+        "type": "object",
+        // One optional property rather than none: Gemini rejects an OBJECT schema without any.
+        "properties": {"ok": {"type": "boolean"}},
+    });
+    let openai_shaped = |url: String, max_tokens_field: &str| {
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": PROMPT}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "ping", "description": "Connectivity check.", "parameters": parameters},
+            }],
+            "tool_choice": {"type": "function", "function": {"name": "ping"}},
+        });
+        body[max_tokens_field] = serde_json::json!(PROBE_MAX_TOKENS);
+        (url, body)
+    };
+    match provider {
+        // OpenAI's newer models refuse `max_tokens` and want `max_completion_tokens`.
+        "openai" => Some(openai_shaped(
+            "https://api.openai.com/v1/chat/completions".into(),
+            "max_completion_tokens",
+        )),
+        "mistral" => Some(openai_shaped(
+            "https://api.mistral.ai/v1/chat/completions".into(),
+            "max_tokens",
+        )),
+        "custom" => {
+            let base = base_url.trim().trim_end_matches('/');
+            (!base.is_empty())
+                .then(|| openai_shaped(format!("{base}/chat/completions"), "max_tokens"))
+        }
+        "anthropic" => Some((
+            "https://api.anthropic.com/v1/messages".into(),
+            serde_json::json!({
+                "model": model,
+                "max_tokens": PROBE_MAX_TOKENS,
+                "messages": [{"role": "user", "content": PROMPT}],
+                "tools": [{"name": "ping", "description": "Connectivity check.", "input_schema": parameters}],
+                "tool_choice": {"type": "tool", "name": "ping"},
+            }),
+        )),
+        "google" => Some((
+            format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"),
+            serde_json::json!({
+                "contents": [{"role": "user", "parts": [{"text": PROMPT}]}],
+                "tools": [{"functionDeclarations": [
+                    {"name": "ping", "description": "Connectivity check.", "parameters": parameters},
+                ]}],
+                "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["ping"]}},
+                "generationConfig": {"maxOutputTokens": PROBE_MAX_TOKENS},
+            }),
+        )),
+        _ => None,
+    }
+}
+
+/// Whether an error says the model will not be *required* to call a tool, as opposed to not
+/// calling tools at all ([`model_cannot_use_tools`]).
+pub fn model_refuses_forced_tools(message: &str) -> bool {
+    let message = message.to_lowercase();
+    message.contains("tool_choice")
+        && ["not supported", "unsupported", "does not support", "is not available"]
+            .iter()
+            .any(|marker| message.contains(marker))
+}
+
+/// Whether an error says the model cannot call tools at all.
+///
+/// Providers word the refusal differently — OpenRouter answers 404 *"No endpoints found that
+/// support tool use"*, Ollama-style servers *"… does not support tools"*, others name function
+/// calling — so the check is a short list of phrasings, compared case-insensitively.
+pub fn model_cannot_use_tools(message: &str) -> bool {
+    const MARKERS: [&str; 7] = [
+        "support tool use",
+        "does not support tools",
+        "do not support tools",
+        "tools are not supported",
+        "tool use is not supported",
+        "does not support function calling",
+        "function calling is not supported",
+    ];
+    let message = message.to_lowercase();
+    MARKERS.iter().any(|marker| message.contains(marker))
+}
+
+/// What a probe's answer says about the model. Pure, so real provider responses can be pinned.
+pub fn classify(status: u16, body: &str) -> ToolSupport {
+    if (200..300).contains(&status) {
+        let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+        let openai_call = json
+            .pointer("/choices/0/message/tool_calls")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|calls| !calls.is_empty());
+        let anthropic_call = json
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_use"));
+        let google_call = body.contains("\"functionCall\"");
+        if openai_call || anthropic_call || google_call {
+            return ToolSupport::Full;
+        }
+        // Ran out of room before calling anything: says nothing about tools.
+        let length = serde_json::Value::from("length");
+        let max_tokens = serde_json::Value::from("max_tokens");
+        let truncated = json.pointer("/choices/0/finish_reason") == Some(&length)
+            || json.get("stop_reason") == Some(&max_tokens)
+            || body.contains("\"MAX_TOKENS\"");
+        if truncated {
+            return ToolSupport::Unknown("the test answer was cut short".into());
+        }
+        return ToolSupport::Partial;
+    }
+    if model_refuses_forced_tools(body) {
+        ToolSupport::Partial
+    } else if model_cannot_use_tools(body) {
+        ToolSupport::None
+    } else if status == 401 || status == 403 {
+        ToolSupport::Unknown("the provider rejected the API key".into())
+    } else {
+        ToolSupport::Unknown(format!("the provider answered {status}"))
+    }
+}
+
+/// Ask `model` to call one specific tool, and say what that shows.
+///
+/// The key goes only into this request's auth header: it is never logged, and only the outcome
+/// is kept ([`save_model_checks`]).
+pub async fn check_model_tools(
+    client: &reqwest::Client,
+    provider: &str,
+    base_url: &str,
+    key: &str,
+    model: &str,
+) -> ToolSupport {
+    let Some((url, body)) = probe_request(provider, base_url, model) else {
+        return ToolSupport::Unknown(if provider == "custom" {
+            "set the endpoint URL first".into()
+        } else {
+            "this provider can't be checked from here".into()
+        });
+    };
+    let request = match provider {
+        "anthropic" => client
+            .post(&url)
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01"),
+        "google" => client.post(&url).header("x-goog-api-key", key),
+        _ => client.post(&url).bearer_auth(key),
+    };
+    let response = match request
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            return ToolSupport::Unknown("could not reach the provider — check the connection".into())
+        }
+    };
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap_or_default();
+    classify(status, &text)
+}
+
+/// A remembered check: what it found, and when.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelCheck {
+    pub support: ToolSupport,
+    /// Unix milliseconds.
+    pub checked_ms: u64,
+}
+
+/// Remembered checks, keyed by [`model_check_key`], in a file beside `models.json`.
+pub type ModelChecks = std::collections::BTreeMap<String, ModelCheck>;
+
+/// One model at one endpoint. The base URL counts only for `custom`, where the same id at a
+/// different gateway can be served by a different provider.
+pub fn model_check_key(provider: &str, base_url: &str, model: &str) -> String {
+    let base = if provider == "custom" {
+        base_url.trim().trim_end_matches('/')
+    } else {
+        ""
+    };
+    format!("{provider}|{base}|{model}")
+}
+
+pub fn model_checks_path() -> PathBuf {
+    catalogue_path().with_file_name("model-checks.json")
+}
+
+/// Every remembered check. A missing or malformed file is none: the checks run again.
+pub fn load_model_checks() -> ModelChecks {
+    std::fs::read_to_string(model_checks_path())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_model_checks(checks: &ModelChecks) -> Result<()> {
+    let path = model_checks_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(checks).context("could not serialise the checks")?;
+    std::fs::write(&path, text).with_context(|| format!("could not write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +591,70 @@ mod tests {
         // A shape we do not understand is no models, not a panic and not a half-read list.
         assert!(parse(&serde_json::json!({"models": ["gemini-2.5-pro"]})).is_empty());
         assert!(parse(&serde_json::json!([])).is_empty());
+    }
+
+    #[test]
+    fn the_tool_check_requires_one_named_tool_in_each_providers_shape() {
+        let (url, body) = probe_request("custom", "https://openrouter.ai/api/v1/", "anthropic/claude-sonnet-5.5")
+            .expect("custom endpoints are checked");
+        assert_eq!(url, "https://openrouter.ai/api/v1/chat/completions");
+        assert_eq!(body["tool_choice"]["function"]["name"], "ping");
+        assert_eq!(body["max_tokens"], PROBE_MAX_TOKENS);
+
+        let (_, body) = probe_request("openai", "", "gpt-5.4-mini").unwrap();
+        assert!(body.get("max_completion_tokens").is_some(), "{body}");
+        assert!(body.get("max_tokens").is_none(), "{body}");
+
+        let (url, body) = probe_request("anthropic", "", "claude-sonnet-4-5").unwrap();
+        assert_eq!(url, "https://api.anthropic.com/v1/messages");
+        assert_eq!(body["tool_choice"], serde_json::json!({"type": "tool", "name": "ping"}));
+
+        let (url, body) = probe_request("google", "", "gemini-2.5-pro").unwrap();
+        assert!(url.ends_with("/models/gemini-2.5-pro:generateContent"), "{url}");
+        assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
+
+        assert!(probe_request("custom", "  ", "x").is_none());
+        assert!(probe_request("somewhere-else", "", "x").is_none());
+    }
+
+    #[test]
+    fn a_model_that_refuses_a_required_tool_is_told_apart_from_one_that_works() {
+        // Verbatim from the backend log of 2026-10-12 (Claude Sonnet 5.5 through OpenRouter).
+        let refused = r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"tool_choice: type \\\"tool\\\" and \\\"any\\\" are not supported for this model.\"}}","provider_name":"Amazon Bedrock"}}}"#;
+        assert_eq!(classify(400, refused), ToolSupport::Partial);
+
+        let called = r#"{"choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"ping","arguments":"{}"}}]}}]}"#;
+        assert_eq!(classify(200, called), ToolSupport::Full);
+
+        let anthropic = r#"{"content":[{"type":"tool_use","id":"t1","name":"ping","input":{}}],"stop_reason":"tool_use"}"#;
+        assert_eq!(classify(200, anthropic), ToolSupport::Full);
+
+        let no_tools = r#"{"error":{"message":"No endpoints found that support tool use.","code":404}}"#;
+        assert_eq!(classify(404, no_tools), ToolSupport::None);
+
+        let cut_short = r#"{"choices":[{"finish_reason":"length","message":{"content":""}}]}"#;
+        assert!(matches!(classify(200, cut_short), ToolSupport::Unknown(_)));
+        assert!(matches!(classify(401, "{}"), ToolSupport::Unknown(reason) if reason.contains("API key")));
+        assert!(matches!(classify(500, "oops"), ToolSupport::Unknown(_)));
+    }
+
+    #[test]
+    fn a_remembered_check_survives_a_round_trip_and_never_holds_a_key() {
+        let mut checks = ModelChecks::new();
+        checks.insert(
+            model_check_key("custom", "https://openrouter.ai/api/v1/", "anthropic/claude-sonnet-5.5"),
+            ModelCheck { support: ToolSupport::Partial, checked_ms: 1 },
+        );
+        checks.insert(
+            model_check_key("anthropic", "ignored for named providers", "claude-sonnet-4-5"),
+            ModelCheck { support: ToolSupport::Full, checked_ms: 2 },
+        );
+        let text = serde_json::to_string(&checks).unwrap();
+        assert!(text.contains("\"outcome\":\"partial\""), "{text}");
+        assert_eq!(serde_json::from_str::<ModelChecks>(&text).unwrap(), checks);
+        assert!(checks.contains_key("anthropic||claude-sonnet-4-5"));
+        assert!(checks.contains_key("custom|https://openrouter.ai/api/v1|anthropic/claude-sonnet-5.5"));
+        assert!(!ToolSupport::Unknown("offline".into()).is_definitive());
     }
 
     #[test]

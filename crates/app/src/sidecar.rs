@@ -833,6 +833,28 @@ impl Sidecar {
         rx
     }
 
+    /// Ask a model to call one specific tool, to learn whether it works with Mini-Me's
+    /// specialists (`catalogue::check_model_tools`). The key is read on the main thread by the
+    /// caller, and is used only in that one request.
+    pub fn check_model_tools(
+        &self,
+        provider: String,
+        base_url: String,
+        api_key: String,
+        model: String,
+    ) -> mpsc::UnboundedReceiver<crate::catalogue::ToolSupport> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let client = reqwest::Client::new();
+            let support = crate::catalogue::check_model_tools(
+                &client, &provider, &base_url, &api_key, &model,
+            )
+            .await;
+            let _ = tx.unbounded_send(support);
+        });
+        rx
+    }
+
     /// Install one theme extension into the researcher's `themes/` directory.
     pub fn install_theme(
         &self,
