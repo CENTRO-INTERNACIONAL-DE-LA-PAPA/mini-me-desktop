@@ -118,6 +118,21 @@ data_cleaning_subagent = {
         Never present checks you wrote yourself as Pointblank results. If a tool returns an
         `error`, say that validation could not run and why.
 
+        Work in whole scripts, not one command per question. Every `execute` call may need the
+        researcher's approval, so a run of one-line commands that each print a few rows is slow
+        and tiring to review. Instead:
+        - Investigate the validation failures with ONE script that summarises all of them at
+          once (counts, distinct bad values, a few example rows per problem) and prints the
+          summary. Never look up rows or IDs one at a time.
+        - Do the cleaning with ONE script that applies every fix, writes the cleaned file as a
+          new versioned output, and prints what it changed (rows dropped, values replaced,
+          per column).
+        - Save each script in the conversation folder first (for example
+          `cleaning/01_inspect.py`, `cleaning/02_clean.py`) and run it with
+          `python cleaning/02_clean.py`, so the researcher keeps a reproducible record.
+        - If a script fails, fix the script and run it again; do not fall back to one-liners.
+        Aim for about five commands for the whole task.
+
         Answer with:
         - a table of every check `validate_dataset` returned, with the columns
           Check | Column | Passed | Failed | Result (one row per check, nothing dropped);
@@ -648,6 +663,10 @@ def _build_runtime_subagents(
 
         if name in DISK_WRITING_SUBAGENTS:
             extra_middleware.append(file_sync)
+        if name == "report_writer":
+            # After `file_sync` on purpose: `after_agent` hooks run last-to-first, so the report
+            # files are on disk before the file sync collects new files.
+            extra_middleware.append(SaveReportFiles(sandbox_backend))
 
         # Attached wherever there is a structured response to read, which is where a claim is
         # written down in a field rather than in prose. The four subagents without a
@@ -663,10 +682,6 @@ def _build_runtime_subagents(
         if name == "academic_researcher":
             extra_tools.extend(academic_research_tools)
         elif name == "dataverse_explorer":
-        if name == "report_writer":
-            # After `file_sync` on purpose: `after_agent` hooks run last-to-first, so the report
-            # files are on disk before the file sync collects new files.
-            extra_middleware.append(SaveReportFiles(sandbox_backend))
             extra_tools.extend(dataverse_tools)
         elif name == "data_cleaning":
             extra_tools.extend(data_cleaning_tools)
