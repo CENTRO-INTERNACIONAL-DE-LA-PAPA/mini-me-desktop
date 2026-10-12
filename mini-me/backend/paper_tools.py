@@ -135,8 +135,8 @@ async def find_papers(query: str, limit: int = 10) -> str:
     The `link` goes to the paper on Semantic Scholar. Pass it through unchanged.
 
     Results include a one-sentence `summary` of what each paper found and its `abstract`, which is
-    usually enough to judge relevance. Use `snippet_search` when you need to quote a passage from
-    the body of a paper.
+    usually enough to judge relevance. To quote a passage from the body of a paper, run
+    `asta papers snippet-search` with `execute`.
 
     Every paper the search returns is listed. Choosing which are relevant is the reader's job, not
     yours — report what you found and say which ones bear on the question.

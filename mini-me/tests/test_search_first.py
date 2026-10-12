@@ -96,9 +96,7 @@ def test_a_failed_search_still_opens_the_gate():
     assert _has_searched(messages)
 
 
-def test_the_mcp_search_counts_as_searching():
-    """A model that reached for Asta's own search has engaged with the literature."""
-    assert _has_searched([_tool_message("snippet_search")])
+def test_only_a_search_result_counts_as_searching():
     assert not _has_searched([_tool_message("write_todos")])
     assert not _has_searched([AIMessage(content="I recall a paper by Sorensen")])
 

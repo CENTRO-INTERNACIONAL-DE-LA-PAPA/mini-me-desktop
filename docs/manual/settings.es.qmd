@@ -49,7 +49,7 @@ normal, y no se vuelven a mostrar después de guardarlas. Usar el modelo de una 
 
 ## Research
 
-Aquí puedes pegar a mano un **Asta token** y una **Asta API key**. La mayoría de las personas
+Aquí puedes pegar a mano un **Asta token**. La mayoría de las personas
 no lo necesita: basta con iniciar sesión en Asta durante la configuración.
 
 ## Backend

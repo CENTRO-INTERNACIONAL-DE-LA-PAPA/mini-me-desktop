@@ -596,8 +596,8 @@ pub fn keychain_status() -> Result<()> {
     }
 }
 
-/// The two Asta credentials, which — unlike the model key — genuinely have to reach the
-/// backend as environment variables: the `asta` CLI reads them from its environment when
+/// The Asta credential, which — unlike the model key — genuinely has to reach the
+/// backend as an environment variable: the `asta` CLI reads it from its environment when
 /// `execute` runs a command, so there is no in-request path for them (docs §20).
 ///
 /// **The model key is deliberately not on this list, and background work is not an
@@ -606,7 +606,7 @@ pub fn keychain_status() -> Result<()> {
 /// instead (docs §38). That is both more correct — a `custom` endpoint needs its
 /// `base_url`, which no environment variable carries — and safer, since the environment
 /// here is one the agent's own `execute` tool can read.
-pub const ASTA_SECRETS: [&str; 2] = ["ASTA_TOKEN", "ASTA_API_KEY"];
+pub const ASTA_SECRETS: [&str; 1] = ["ASTA_TOKEN"];
 
 pub fn asta_env() -> Vec<(String, String)> {
     ASTA_SECRETS

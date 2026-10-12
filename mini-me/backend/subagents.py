@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 
 academic_subagent = {
     "name": "academic_researcher",
-    "description": "Conducts research using Asta tools (via MCP tools).",
+    "description": "Conducts research using the Asta CLI.",
     "system_prompt": """
     You are an academic research agent.
     Use available tools to find and synthesize relevant scientific evidence.

@@ -38,7 +38,6 @@ from backend.runtime import (
 from backend.models import _build_model_resolver, _require_model_keys
 from backend.local.workspace import LocalWorkspaceBackend
 from backend.mcp_tools import (
-    get_academic_research_mcp_tools,
     get_data_cleaning_mcp_tools,
     get_dataverse_search_mcp_tools,
     mcp_status_report,
@@ -157,18 +156,16 @@ async def agent(config: RunnableConfig):
     # So `read_file` never hands this model an attachment it cannot take (workspace.py).
     sandbox_backend.adapt_to_model(coordinator_model)
 
-    # `find_papers` first, and alongside the MCP bundle rather than instead of it. It returns
-    # each paper with its reference already built from the record (`backend/citations.py`), which
-    # is what stops the model composing one from memory; `snippet_search` stays available for the
-    # separate job of quoting a passage out of a paper's body.
+    # Literature search is the Asta CLI alone. `find_papers` returns each paper with its reference
+    # already built from the record (`backend/citations.py`), which is what stops the model
+    # composing one from memory.
     # Stateless discovery calls are independent. A cold graph should wait for the slowest hosted
     # deployment, not the sum of all of them; each loader owns its own non-fatal failure boundary.
-    academic_mcp_tools, dataverse_tools, data_cleaning_tools = await asyncio.gather(
-        get_academic_research_mcp_tools(),
+    dataverse_tools, data_cleaning_tools = await asyncio.gather(
         get_dataverse_search_mcp_tools(),
         get_data_cleaning_mcp_tools(),
     )
-    academic_research_tools = [find_papers, *academic_mcp_tools]
+    academic_research_tools = [find_papers]
     external_tool_names = _tool_names(
         [
             *academic_research_tools,

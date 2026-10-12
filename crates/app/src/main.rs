@@ -1193,17 +1193,15 @@ enum Field {
     BaseUrl,
     ApiKey,
     AstaToken,
-    AstaApiKey,
     Port,
 }
 
 impl Field {
-    const ALL: [Field; 6] = [
+    const ALL: [Field; 5] = [
         Field::ModelId,
         Field::BaseUrl,
         Field::ApiKey,
         Field::AstaToken,
-        Field::AstaApiKey,
         Field::Port,
     ];
 
@@ -1213,7 +1211,6 @@ impl Field {
             Field::BaseUrl => "Base URL",
             Field::ApiKey => "API key",
             Field::AstaToken => "Asta token",
-            Field::AstaApiKey => "Asta API key",
             Field::Port => "Backend port",
         }
     }
@@ -1222,7 +1219,7 @@ impl Field {
     fn section(self) -> Section {
         match self {
             Field::ModelId | Field::BaseUrl | Field::ApiKey => Section::Model,
-            Field::AstaToken | Field::AstaApiKey => Section::Research,
+            Field::AstaToken => Section::Research,
             Field::Port => Section::Backend,
         }
     }
@@ -1233,13 +1230,12 @@ impl Field {
             Field::BaseUrl => "https://… (custom providers only)",
             Field::ApiKey => "Paste to set — stored in the OS keychain",
             Field::AstaToken => "Paste to set",
-            Field::AstaApiKey => "Paste to set",
             Field::Port => "2024",
         }
     }
 
     fn is_secret(self) -> bool {
-        matches!(self, Field::ApiKey | Field::AstaToken | Field::AstaApiKey)
+        matches!(self, Field::ApiKey | Field::AstaToken)
     }
 
     /// The keychain entry a secret field writes to. `None` for the provider key, whose
@@ -1247,7 +1243,6 @@ impl Field {
     fn secret_name(self) -> Option<&'static str> {
         match self {
             Field::AstaToken => Some("ASTA_TOKEN"),
-            Field::AstaApiKey => Some("ASTA_API_KEY"),
             _ => None,
         }
     }
@@ -10481,7 +10476,7 @@ mod tests {
                     // is resolved at save time rather than being fixed here.
                     assert!(field.secret_name().is_none());
                 }
-                Field::AstaToken | Field::AstaApiKey => {
+                Field::AstaToken => {
                     assert!(field.is_secret());
                     assert!(field.secret_name().is_some());
                 }

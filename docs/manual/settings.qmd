@@ -46,7 +46,7 @@ the one the key belongs to.
 
 ## Research
 
-Here you can paste an **Asta token** and an **Asta API key** by hand. Most people don't need
+Here you can paste an **Asta token** by hand. Most people don't need
 this: signing in to Asta during setup is enough.
 
 ## Backend

@@ -921,8 +921,8 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                             note: "about a minute",
                         },
                         Fix::Manual(
-                            "Afterwards, paste ASTA_TOKEN and ASTA_API_KEY in Settings — the \
-                             CLI reads them from its environment when a command runs."
+                            "Afterwards, sign in to Asta, or paste an ASTA_TOKEN in Settings — \
+                             the CLI reads it from its environment when a command runs."
                                 .into(),
                         ),
                     ],
