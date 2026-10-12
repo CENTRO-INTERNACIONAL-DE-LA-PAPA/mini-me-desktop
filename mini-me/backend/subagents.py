@@ -40,6 +40,7 @@ from backend.middleware import (
     SearchResultsFile,
     ValidateBeforeAnswering,
 )
+from backend.middleware.report_files import SaveReportFiles
 from backend.theory_tools import generate_theories
 
 if TYPE_CHECKING:
@@ -251,11 +252,13 @@ report_writer_subagent = {
           image inline.
         - Always include a short caption in the alt text.
 
-        Optional file output:
-        - You MAY also save the markdown to disk for archival
-          (`./final_report.md`), but this is optional — the structured
-          response is what the user actually downloads. Use a relative
-          filename, never an absolute path.
+        Files:
+        - Once you return your structured response, the report is saved
+          automatically in the conversation folder as `reports/<title>.pdf`
+          (the deliverable) and `reports/<title>.md` (its editable source).
+          Do not write either file yourself.
+        - In your chat message, point the user to the PDF in `reports/`
+          first, and mention the markdown copy beside it.
 
         Include code as fenced code blocks inside an Appendix section when
         relevant. Keep prose tight; do not invent results.
@@ -660,6 +663,10 @@ def _build_runtime_subagents(
         if name == "academic_researcher":
             extra_tools.extend(academic_research_tools)
         elif name == "dataverse_explorer":
+        if name == "report_writer":
+            # After `file_sync` on purpose: `after_agent` hooks run last-to-first, so the report
+            # files are on disk before the file sync collects new files.
+            extra_middleware.append(SaveReportFiles(sandbox_backend))
             extra_tools.extend(dataverse_tools)
         elif name == "data_cleaning":
             extra_tools.extend(data_cleaning_tools)

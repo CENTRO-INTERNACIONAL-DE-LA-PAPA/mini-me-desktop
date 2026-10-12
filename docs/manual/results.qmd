@@ -88,8 +88,10 @@ prepared, so you can see that it failed.
 Ask *"Write a report of what we found"* and the **Report Writer** creates a full report with
 methods, findings, limitations and references. It appears under **Files**.
 
-**To save the report as a PDF:** press **`Ctrl+P`** and choose
-**Save the latest report as a PDF**. The PDF is saved in the conversation's folder.
+**The PDF is saved for you:** each report is also saved as a PDF in the conversation's
+`reports` folder, named after the report's title, and appears under **Files** with the rest.
+To save a fresh copy at any time, press **`Ctrl+P`** and choose
+**Save the latest report as a PDF**.
 
 ![A report saved as PDF](images/results-report-pdf.png)
 

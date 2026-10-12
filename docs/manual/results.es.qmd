@@ -95,8 +95,10 @@ no se pudo preparar, para que sepas que falló.
 Pide *"Escribe un informe de lo que encontramos"* y el **Report Writer** crea un informe
 completo con métodos, hallazgos, limitaciones y referencias. Aparece en **Files**.
 
-**Para guardar el informe como PDF:** presiona **`Ctrl+P`** y elige **Save the latest report
-as a PDF**. El PDF se guarda en la carpeta de la conversación.
+**El PDF se guarda solo:** cada informe también se guarda como PDF en la carpeta `reports` de
+la conversación, con el título del informe como nombre, y aparece en **Files** con lo demás.
+Para guardar una copia nueva cuando quieras, presiona **`Ctrl+P`** y elige **Save the latest
+report as a PDF**.
 
 ![Un informe guardado como PDF](images/results-report-pdf.png)
 
