@@ -37,7 +37,6 @@ LABELS: dict[str, str] = {
     "report_writer": "Report Writer",
     "hypothesis_generator": "Hypothesis Generator",
     "pdf_librarian": "PDF Librarian",
-    "data_voyager": "DataVoyager",
     "autodiscovery": "AutoDiscovery",
     "research_planner": "Research Planner",
 }
@@ -124,7 +123,7 @@ def test_the_two_lists_the_planner_reads_agree():
 
 
 def test_a_credit_spending_specialist_says_so_where_the_model_reads_it():
-    """AutoDiscovery and DataVoyager spend the researcher's Asta credits.
+    """AutoDiscovery spends the researcher's Asta credits.
 
     The gate that stops an unapproved run is real (`NoSpendingWithoutApproval`), and it is not the
     coordinator's only defence: a coordinator that does not know a specialist costs money will

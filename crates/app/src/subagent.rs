@@ -56,7 +56,6 @@ pub fn display(name: &str) -> (String, u32) {
         "report_writer" => "Report Writer".into(),
         "hypothesis_generator" => "Hypothesis Generator".into(),
         "pdf_librarian" => "PDF Librarian".into(),
-        "data_voyager" => "Data Voyager".into(),
         "autodiscovery" => "AutoDiscovery".into(),
         "research_planner" => "Research Planner".into(),
         // A specialist this table doesn't yet name — added since this was last written — is
@@ -73,7 +72,6 @@ pub fn display(name: &str) -> (String, u32) {
         "report_writer" => 0x06B6D4,
         "hypothesis_generator" => 0xEF4444,
         "pdf_librarian" => 0x14B8A6,
-        "data_voyager" => 0xEC4899,
         "autodiscovery" => 0xF97316,
         "research_planner" => 0x3B82F6,
         _ => 0xFFFFFF,
@@ -83,7 +81,7 @@ pub fn display(name: &str) -> (String, u32) {
 
 /// Every name [`display`] gives its own colour to — kept beside it, and in the same order, so
 /// the two cannot drift apart the way a name matched here and not there would.
-const NAMED: [&str; 12] = [
+const NAMED: [&str; 11] = [
     "academic_researcher",
     "dataverse_explorer",
     "data_cleaning",
@@ -93,7 +91,6 @@ const NAMED: [&str; 12] = [
     "report_writer",
     "hypothesis_generator",
     "pdf_librarian",
-    "data_voyager",
     "autodiscovery",
     "research_planner",
 ];
@@ -131,7 +128,7 @@ pub struct Command {
 /// The characters a specialist name is made of.
 ///
 /// Every name the backend registers is snake_case ASCII — `academic_researcher`,
-/// `pdf_librarian`, `data_voyager`. Hyphens are allowed because refusing them would turn a near
+/// `pdf_librarian`, `research_planner`. Hyphens are allowed because refusing them would turn a near
 /// miss into "this is not a command at all", and the picker's "did you mean" is the better answer.
 fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
@@ -267,7 +264,7 @@ mod tests {
     }
 
     fn registry() -> Vec<Subagent> {
-        // The real ten, from the fixture the backend wrote.
+        // The real nine, from the fixture the backend wrote.
         crate::workspace::parse_registry(include_str!("../tests/fixtures/subagent-registry.json"))
     }
 
@@ -389,7 +386,7 @@ mod tests {
 
     #[test]
     fn the_names_that_are_real_still_parse() {
-        for name in ["pdf_librarian", "data_voyager", "academic_researcher", "eda2", "a-b"] {
+        for name in ["pdf_librarian", "autodiscovery", "academic_researcher", "eda2", "a-b"] {
             let command = parse(&format!("/{name} do the thing")).expect("a command");
             assert_eq!(command.name, name);
             assert_eq!(command.prompt, "do the thing");

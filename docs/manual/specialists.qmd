@@ -17,7 +17,6 @@ the team can do.
 | **Exploratory Data Analysis** | Describes your data: summaries, missing values, unusual values, and charts. | *Show me what is in this data, with charts.* |
 | **Diagnostic Analytics** | Looks into *why* something happened, using comparisons and statistics. | *Why did yield drop in 2022?* |
 | **Predictive Analytics** | Builds and compares models that predict an outcome, and tells you how reliable they are. | *Predict yield from rainfall and temperature.* |
-| **Data Voyager** | Tests one specific question against your data and returns findings and charts. | *Is there a link between planting date and yield in this file?* |
 | **Hypothesis Generator** | Suggests new ideas and explanations, based on the literature. | *Suggest hypotheses about why this variety resists frost.* |
 | **AutoDiscovery** | Explores a dataset on its own, coming up with and testing many ideas. It **asks for your approval** first because it uses credits. | *Explore this dataset and find surprising results.* |
 | **Report Writer** | Puts everything together into a complete report with methods, findings, limitations and references. | *Write a report of what we found.* |
@@ -25,7 +24,7 @@ the team can do.
 ![Each specialist has its own colour](images/specialists-colours.png)
 
 ::: {.callout-note}
-Some specialists (Academic Researcher, PDF Librarian, Data Voyager, Hypothesis Generator and
+Some specialists (Academic Researcher, PDF Librarian, Hypothesis Generator and
 AutoDiscovery) use the **Asta** service, so you need to have signed in to Asta during
 setup. The Dataverse Explorer needs **no sign-in**: it searches the public CIP Dataverse
 directly.

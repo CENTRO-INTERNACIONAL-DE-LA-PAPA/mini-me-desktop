@@ -1127,8 +1127,7 @@ async def draft_discovery_run(
 
     AutoDiscovery decides its own hypotheses: it searches over experiments, writes and runs code
     for each, and reports how far the result moved its prior belief. Use it when the question is
-    "what is in this data" rather than a specific analytical question — `analyze_data` is the tool
-    for a question you can already state.
+    "what is in this data" rather than a specific analytical question the user can already state.
 
     This DRAFTS the run and does not start it. Each experiment costs one credit from the
     researcher's grant, so starting it needs their explicit approval, which happens in the desktop

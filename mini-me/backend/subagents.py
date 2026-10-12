@@ -1,10 +1,9 @@
 """Specialist subagent definitions and per-request runtime assembly.
 
-The coordinator delegates to **twelve** specialist subagents: academic research,
+The coordinator delegates to **eleven** specialist subagents: academic research,
 dataverse exploration, data cleaning, EDA, diagnostic + predictive analytics,
-report writing, hypothesis generation, the PDF librarian, DataVoyager,
-AutoDiscovery and the research planner. It said seven for as long as there were
-twelve, which is the same kind of drift that left AutoDiscovery out of the
+report writing, hypothesis generation, the PDF librarian, AutoDiscovery and the
+research planner. It said seven for as long as there were more, which is the same kind of drift that left AutoDiscovery out of the
 coordinator's own list of what it may route to (§295) — a count is a claim, and
 `tests/test_every_specialist_is_reachable.py` now holds the lists that matter to
 the registry below. This module holds their static definitions, the
@@ -21,7 +20,6 @@ from langchain_core.tools import tool
 
 from backend.schemas import (
     AcademicResearchResults,
-    DataAnalysisResults,
     DiscoveryRunResults,
     DataVerseSearchResults,
     HypothesisOutput,
@@ -36,7 +34,6 @@ from backend.middleware import (
     RunBeforeReporting,
     DraftBeforeReporting,
     NoSpendingWithoutApproval,
-    SubmitBeforeReporting,
     TheorizeBeforeReporting,
     SearchBeforeCiting,
     SearchBeforeRecommending,
@@ -252,8 +249,7 @@ report_writer_subagent = {
 
         Provenance (`derived_from`): list the artifacts this report synthesizes so
         the investigation graph links them — the theories (`{"kind":"hypothesis",
-        "ref": <research question verbatim>}`), analyses (`{"kind":"analysis",
-        "ref": <its question verbatim>}`), datasets, and key sources you drew on.
+        "ref": <research question verbatim>}`), datasets, and key sources you drew on.
         Quote each `ref` exactly so it matches the existing artifact; omit anything
         you cannot quote precisely rather than guessing.
     """,
@@ -376,127 +372,15 @@ pdf_librarian_subagent = {
     "response_format": LibraryArtifact,
 }
 
-DATA_VOYAGER_SYSTEM_PROMPT = """
-    You are the DataVoyager subagent for Mini-Me. Your job is to run the Asta
-    DataVoyager pipeline (`asta analyze-data`) in the sandbox to generate and test
-    hypotheses against the user's own tabular dataset — closing the loop from a
-    theory or question to evidence in the data.
-
-    Follow the data_voyager skill exactly. Use the `analyze_data` tool to run it.
-    Do NOT call the `asta` CLI yourself and do NOT poll with `execute`. The tool
-    SUBMITS the run and returns immediately — it does not wait for the analysis.
-    The Analysis panel fills in on its own as the run completes (minutes to tens of
-    minutes).
-
-    First, draft a TIGHTENED analytical question. Measured against the live service
-    (docs §239), the difference between a run that computes and a run that describes
-    what it would compute is in how the question is written. Four rules, each of
-    which changed the outcome:
-
-      1. NAME THE DATASETS by filename, and say which is which — training,
-         held-out, and so on.
-      2. NAME THE METHODS. "Compare candidate models" produced a plan;
-         "fit and compare ridge, random forest and gradient boosting with 5-fold
-         cross-validation" produced fitted models. You are not constraining the
-         analysis by naming methods — DataVoyager will substitute better ones — you
-         are making it clear that fitting is the task.
-      3. ASK FOR THE NUMBERS. Name the metrics you want back (R², RMSE, a
-         confusion matrix) and ask for the charts. A question with no requested
-         output is answerable with prose.
-      4. SAY TO RUN IT. End with something like "actually run the code and report
-         the numbers". This reads redundant and is not: without it, a well-formed
-         question came back as a preprocessing plan with no models fitted.
-
-    A question meeting all four, verbatim from the run that worked:
-
-      "Train and evaluate regression models predicting SOC_MgHa from the numeric
-       covariates in trainval.csv. Build a preprocessing pipeline, fit and compare
-       at least three candidate models (ridge, random forest, gradient boosting)
-       with cross-validation, select the best, then report R2 and RMSE on the
-       held-out test.csv, name the most important predictors, and produce charts.
-       Actually run the code and report the numbers."
-
-    Uploaded files are already on disk at the relative paths in the user's
-    "Attached files" blockquote — pass those exact paths as `dataset_paths`
-    (comma-separated for several); never ask the user to re-upload.
-
-    Starting vs checking:
-      - Normally call `analyze_data(question=<tightened question>,
-        dataset_paths=<the paths>)` and pass NO `context_id`. A fresh session is
-        the right default: DataVoyager reasons over the whole history of a context,
-        so a question asked inside a session about something else is answered in
-        the light of that other thing. One run declined to fit anything because the
-        session it landed in already contained an unrelated experiment.
-      - Pass `context_id` ONLY when the user is explicitly continuing the same
-        analysis — a follow-up about the same data and the same goal.
-      - Only if the user explicitly asks you to check a specific run, call
-        `analyze_data(resume_task_id=<that task id>, context_id=<that context id>)`
-        — it does a single status check.
-
-    Handle the tool result (set the DataAnalysisResults `status` to match):
-      - `"running"` → the run was submitted and is generating in the background.
-        Return a DataAnalysisResults with `status="running"`, the returned
-        `task_id` and `context_id`, the user's `question` and `dataset_paths`, and
-        empty findings. Tell the user their analysis is running and will appear in
-        the Analysis panel automatically in a few minutes. Do NOT call the tool
-        again.
-      - `"completed"` (only from an explicit check) → build DataAnalysisResults
-        from the result: a tight `summary`, the concrete `findings` (each with a
-        `chart_path` when a figure backs it), the `hypotheses_tested` with their
-        verdicts, and the `charts`. Ground every claim in `analysis_text` and the
-        files the run wrote to disk — read them with your filesystem tools if
-        needed. Set `question`, `dataset_paths`, `task_id`, `context_id`.
-      - `"input-required"` → relay the tool's `prompt` and ask the user for the
-        missing input; return `status="input-required"` with `task_id`/`context_id`.
-      - `"failed"`/`"error"` → DataAnalysisResults with `status="failed"`, the
-        `question`, empty findings, and the reason in `summary`.
-
-    Provenance (`derived_from`): whenever this analysis was built on prior
-    artifacts, list them so the investigation graph links them. Add one entry per
-    input: for a theory you are testing, `{"kind": "hypothesis", "ref": <the
-    theory set's research question, quoted EXACTLY as it appears on the Theories
-    card>, "relation": "tests"}`; for the dataset, `{"kind": "dataset", "ref": <its
-    path or persistent id>}`. Quote each `ref` verbatim so it matches the existing
-    artifact; if you cannot quote it exactly, OMIT that entry rather than guessing
-    — a wrong ref simply produces no link (never a fabricated one).
-
-    When a run completes, its outputs are saved to the sandbox at
-    `analysis/<task_id>.md` (with a `.json` and the exported charts/notebook under
-    `analysis/<task_id>/` alongside). If the user later asks you to summarize,
-    compare, or build on a completed analysis, read that file with your filesystem
-    tools instead of re-running DataVoyager — the `task_id` is on the Analysis
-    artifact. NEVER invent findings, numbers, or charts. NEVER present a running
-    run as a failure or as "no findings" — it is still generating and the panel
-    will populate itself. ALWAYS return a structured DataAnalysisResults.
-"""
-
-
-data_voyager_subagent = {
-    "name": "data_voyager",
-    "description": (
-        "Run the Asta DataVoyager pipeline (`asta analyze-data`) to generate and "
-        "test hypotheses against a local tabular dataset: it writes and executes "
-        "code in a sandboxed notebook to answer a specific analytical question and "
-        "returns findings, charts, and the hypotheses it evaluated. Use it to test "
-        "theories or questions against the user's own data."
-    ),
-    "system_prompt": DATA_VOYAGER_SYSTEM_PROMPT,
-    "skills": ["/skills/"],
-    "middleware": [],
-    "tools": [],
-    "response_format": DataAnalysisResults,
-}
-
 AUTODISCOVERY_SYSTEM_PROMPT = """
     You are the AutoDiscovery subagent for Mini-Me. Your job is to prepare an Asta
     AutoDiscovery run over the user's own tabular data — and then stop.
 
-    AutoDiscovery is not DataVoyager. DataVoyager answers an analytical question
-    you write. AutoDiscovery decides its own questions: it searches over
-    hypotheses, writes and runs code for each one, and reports how far each result
-    moved its prior belief. Use it when the user wants to know what is IN the data
-    rather than to test something they can already state. When they can state it,
-    `data_voyager` is the better tool.
+    AutoDiscovery decides its own questions: it searches over hypotheses, writes and
+    runs code for each one, and reports how far each result moved its prior belief.
+    Use it when the user wants to know what is IN the data rather than to test
+    something they can already state. When they can state it, the analytics
+    specialists (`diagnostic_analytics`, `predictive_analytics`) are the better tool.
 
     YOU CANNOT START A RUN, AND THIS IS NOT A LIMITATION TO WORK AROUND. Every
     experiment costs one credit from a fixed grant that cannot be topped up, so
@@ -571,8 +455,8 @@ autodiscovery_subagent = {
         "Prepare an Asta AutoDiscovery run over a local tabular dataset: an "
         "AI-driven search that writes and tests its own hypotheses and reports "
         "which results most changed its beliefs. Use it for open-ended 'what is in "
-        "this data' exploration, where `data_voyager` is for a question the user "
-        "can already state. It DRAFTS the run only — each experiment costs a "
+        "this data' exploration, not for a question the user can already state. "
+        "It DRAFTS the run only — each experiment costs a "
         "credit, so the researcher approves the budget in the app before anything "
         "runs."
     ),
@@ -601,13 +485,13 @@ RESEARCH_PLANNER_SYSTEM_PROMPT = """
           * `action` — the subagent that runs it, using its friendly label
             exactly: 'Academic Research', 'Dataverse Explorer', 'Data Cleaning',
             'Exploratory Data Analysis', 'Diagnostic Analytics', 'Predictive
-            Analytics', 'Hypothesis Generator', 'PDF Librarian', 'DataVoyager',
+            Analytics', 'Hypothesis Generator', 'PDF Librarian',
             'AutoDiscovery', or 'Report Writer'.
           * `prompt` — the ready-to-send message that runs the step, phrased
             "Use the <subagent_name> subagent to …" (snake_case subagent name:
             academic_researcher, dataverse_explorer, data_cleaning,
             exploratory_data_analysis, diagnostic_analytics, predictive_analytics,
-            hypothesis_generator, pdf_librarian, data_voyager, report_writer), so
+            hypothesis_generator, pdf_librarian, report_writer), so
             the coordinator routes it. Make each prompt concrete and grounded in
             the goal and prior work — the user will read and send it verbatim.
 
@@ -648,7 +532,6 @@ subagents = [
     report_writer_subagent,
     hypothesis_generator_subagent,
     pdf_librarian_subagent,
-    data_voyager_subagent,
     autodiscovery_subagent,
     research_planner_subagent,
 ]
@@ -668,7 +551,6 @@ DISK_WRITING_SUBAGENTS = frozenset(
         "report_writer",
         "hypothesis_generator",
         "pdf_librarian",
-        "data_voyager",
         # Its results are written by the poll route, not by the model — but the files land in the
         # conversation's folder either way, and a run whose outputs nothing surfaces is a run the
         # researcher paid credits for and cannot see.
@@ -684,7 +566,6 @@ def _build_runtime_subagents(
     data_cleaning_tools: list[Any],
     diagnostic_tools: list[Any],
     theory_tools: list[Any],
-    datavoyager_tools: list[Any],
     discovery_tools: list[Any],
     file_sync: "FileSyncMiddleware",
     sandbox_backend: "LocalWorkspaceBackend",
@@ -728,11 +609,6 @@ def _build_runtime_subagents(
             # Its first run reported an index that was never created (§230). Same exit as the
             # other two, closed the same way — see `middleware/library_first.py`.
             extra_middleware.append(RunBeforeReporting())
-        elif name == "data_voyager":
-            extra_middleware.append(ArtifactCaptureMiddleware("data_voyager"))
-            # The most expensive one to have fabricate: a composed `DataAnalysisResults` looks
-            # exactly like a twenty-minute analysis and costs nothing.
-            extra_middleware.append(SubmitBeforeReporting())
         elif name == "autodiscovery":
             extra_middleware.append(ArtifactCaptureMiddleware("autodiscovery"))
             # The one where a fabricated artifact reaches the *credit gate*: its `run_id` is what
@@ -772,8 +648,6 @@ def _build_runtime_subagents(
             extra_tools.extend(diagnostic_tools)
         elif name == "hypothesis_generator":
             extra_tools.extend(theory_tools)
-        elif name == "data_voyager":
-            extra_tools.extend(datavoyager_tools)
         elif name == "autodiscovery":
             extra_tools.extend(discovery_tools)
 

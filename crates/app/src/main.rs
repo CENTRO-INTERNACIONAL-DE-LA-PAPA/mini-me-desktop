@@ -1645,10 +1645,10 @@ fn sync_library_bucket(buckets: &mut Vec<protocol::Bucket>, documents: &[protoco
             bucket.items = titles;
         }
     } else if !titles.is_empty() {
-        // Keep the protocol's usual display order: libraries precede analyses/recommendations.
+        // Keep the protocol's usual display order: libraries precede discoveries/recommendations.
         let position = buckets
             .iter()
-            .position(|bucket| matches!(bucket.name, "analyses" | "recommendations"))
+            .position(|bucket| matches!(bucket.name, "discoveries" | "recommendations"))
             .unwrap_or(buckets.len());
         buckets.insert(
             position,
@@ -7937,7 +7937,6 @@ impl Workbench {
                             kind: protocol::JobKind::Discovery,
                             task_id: draft.run_id.clone(),
                             question: draft.name.clone(),
-                            context_id: None,
                             status: status.clone(),
                             size: Some(u64::from(cost.experiments)),
                         },
@@ -8060,7 +8059,6 @@ impl Workbench {
                                     kind: protocol::JobKind::Discovery,
                                     task_id: run_id.clone(),
                                     question: kind.clone(),
-                                    context_id: None,
                                     status: "running".to_string(),
                                     size: Some(u64::from(experiments)),
                                 },
@@ -8884,7 +8882,6 @@ mod tests {
                 kind,
                 task_id: "20840df8-a8e8-4ab0-a65c-1b1824961955".into(),
                 question: "SOC modelling".into(),
-                context_id: None,
                 status: "completed".into(),
                 size: None,
             },
@@ -9275,10 +9272,10 @@ mod tests {
 
     #[test]
     fn one_collected_run_is_named_and_openable() {
-        let runs = [collected(protocol::JobKind::Analysis, "01a0215f-c66b-7461-96f2-595a168fa8f8")];
+        let runs = [collected(protocol::JobKind::Discovery, "01a0215f-c66b-7461-96f2-595a168fa8f8")];
         // The label names what finished rather than counting it.
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].1.kind.label(), "Data analysis");
+        assert_eq!(runs[0].1.kind.label(), "Discovery");
         assert_eq!(runs[0].0, "01a0215f-c66b-7461-96f2-595a168fa8f8");
     }
 
@@ -9286,7 +9283,7 @@ mod tests {
     #[test]
     fn several_collected_runs_are_counted_rather_than_opened() {
         let runs = [
-            collected(protocol::JobKind::Analysis, "aaa"),
+            collected(protocol::JobKind::Discovery, "aaa"),
             collected(protocol::JobKind::Theorizer, "bbb"),
         ];
         assert!(runs.len() > 1);
@@ -9306,10 +9303,9 @@ mod tests {
     #[test]
     fn a_finished_run_is_not_swept_again() {
         let base = protocol::Job {
-            kind: protocol::JobKind::Analysis,
+            kind: protocol::JobKind::Discovery,
             task_id: "t".into(),
             question: "q".into(),
-            context_id: None,
             status: String::new(),
             size: None,
         };
@@ -9327,13 +9323,12 @@ mod tests {
     #[test]
     fn a_file_a_running_job_has_not_written_yet_is_not_missing() {
         let task = "4c290c71-be43-421a-8273-2f98dcc7b331";
-        let named = format!("analysis/{task}.md");
+        let named = format!("discovery/{task}.md");
 
         let running = protocol::Job {
-            kind: protocol::JobKind::Analysis,
+            kind: protocol::JobKind::Discovery,
             task_id: task.to_string(),
             question: "SOC modelling".into(),
-            context_id: None,
             status: "working".into(),
             size: None,
         };
@@ -9354,14 +9349,13 @@ mod tests {
     #[test]
     fn an_unrelated_filename_is_not_exempted_by_a_running_job() {
         let running = protocol::Job {
-            kind: protocol::JobKind::Analysis,
+            kind: protocol::JobKind::Discovery,
             task_id: "4c290c71-be43-421a-8273-2f98dcc7b331".into(),
             question: "q".into(),
-            context_id: None,
             status: "working".into(),
             size: None,
         };
-        for other in ["eda_distributions.png", "analysis/deadbeef-0000.md", "final_report.md"] {
+        for other in ["eda_distributions.png", "discovery/deadbeef-0000.md", "final_report.md"] {
             assert!(
                 !other.to_ascii_lowercase().contains(&running.task_id.to_ascii_lowercase()),
                 "{other} must still be checked"
@@ -9452,8 +9446,8 @@ mod tests {
             ..Default::default()
         }];
         let mut buckets = vec![protocol::Bucket {
-            name: "analyses",
-            items: vec!["Existing analysis".into()],
+            name: "discoveries",
+            items: vec!["Existing discovery".into()],
         }];
 
         sync_library_bucket(&mut buckets, &documents);
@@ -9462,7 +9456,7 @@ mod tests {
 
         sync_library_bucket(&mut buckets, &[]);
         assert_eq!(buckets.len(), 1);
-        assert_eq!(buckets[0].name, "analyses");
+        assert_eq!(buckets[0].name, "discoveries");
     }
 
     #[test]
@@ -11164,10 +11158,9 @@ mod tests {
         // And the stored question is untouched — it is also a query parameter the theorizer's
         // poll route sends back.
         let job = protocol::Job {
-            kind: protocol::JobKind::Analysis,
+            kind: protocol::JobKind::Theorizer,
             task_id: "t".into(),
             question: question.to_string(),
-            context_id: None,
             status: "working".into(),
             size: None,
         };

@@ -77,11 +77,10 @@ To search inside your PDFs, just ask — for example *"Which of my PDFs discuss 
 damage?"*. Mini-Me searches **by meaning**, so it finds relevant passages even if they don't use
 your exact words.
 
-## Hypotheses, analyses and discoveries
+## Hypotheses and discoveries
 
-When the **Hypothesis Generator**, **Data Voyager** or **AutoDiscovery** have worked in this
-conversation, their results are listed in the **Hypotheses**, **Analyses** and **Discoveries**
-sections of the Pinboard. **Discoveries** also lists an AutoDiscovery run that could not be
+When the **Hypothesis Generator** or **AutoDiscovery** have worked in this conversation, their
+results are listed in the **Hypotheses** and **Discoveries** sections of the Pinboard. **Discoveries** also lists an AutoDiscovery run that could not be
 prepared, so you can see that it failed.
 
 ## Reports

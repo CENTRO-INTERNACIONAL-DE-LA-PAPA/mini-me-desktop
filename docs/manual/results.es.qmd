@@ -84,11 +84,10 @@ Para buscar dentro de tus PDF, simplemente pregunta; por ejemplo, *"¿Cuáles de
 de daños por heladas?"*. Mini-Me busca **por significado**, así que encuentra pasajes
 relevantes aunque no usen tus palabras exactas.
 
-## Hipótesis, análisis y descubrimientos
+## Hipótesis y descubrimientos
 
-Cuando el **Hypothesis Generator**, **Data Voyager** o **AutoDiscovery** han trabajado en esta
-conversación, sus resultados aparecen en las secciones **Hypotheses**, **Analyses** y
-**Discoveries** del Pinboard. **Discoveries** también muestra una ejecución de AutoDiscovery que
+Cuando el **Hypothesis Generator** o **AutoDiscovery** han trabajado en esta conversación, sus
+resultados aparecen en las secciones **Hypotheses** y **Discoveries** del Pinboard. **Discoveries** también muestra una ejecución de AutoDiscovery que
 no se pudo preparar, para que sepas que falló.
 
 ## Informes

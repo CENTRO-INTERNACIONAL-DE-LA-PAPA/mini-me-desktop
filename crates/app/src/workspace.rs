@@ -2418,7 +2418,7 @@ mod tests {
 
     #[test]
     fn the_registry_says_which_specialists_reach_asta() {
-        // The three real descriptions, verbatim from `backend/subagents.py` (2026-08-07). The
+        // The real descriptions, verbatim from `backend/subagents.py` (2026-08-07). The
         // list is read rather than copied, so this test is about the *rule* holding against the
         // text upstream actually writes.
         let registry = parse_registry(
@@ -2429,8 +2429,6 @@ mod tests {
                      "description": "Conducts research using Asta tools (via MCP tools)."},
                     {"name": "hypothesis_generator",
                      "description": "Generate literature-grounded scientific theories and hypotheses for a research question using the Asta Theorizer pipeline."},
-                    {"name": "data_voyager",
-                     "description": "Run the Asta DataVoyager pipeline (`asta analyze-data`) to generate and test hypotheses."},
                     {"name": "report_writer",
                      "description": "Write a polished report from the findings and recommendations."},
                     {"name": "dataverse_explorer",
@@ -2446,16 +2444,12 @@ mod tests {
             .collect();
         assert_eq!(
             asta,
-            [
-                "academic_researcher",
-                "hypothesis_generator",
-                "data_voyager"
-            ]
+            ["academic_researcher", "hypothesis_generator"]
         );
         // The report writer produces the document the attribution goes *in*. Crediting Asta
         // because that ran would restore the bug in a new place.
-        assert!(!registry[3].uses_asta());
-        assert!(!registry[4].uses_asta(), "CIP Dataverse is not Asta");
+        assert!(!registry[2].uses_asta());
+        assert!(!registry[3].uses_asta(), "CIP Dataverse is not Asta");
 
         // An empty or unreadable registry credits nothing. A missing acknowledgement can be
         // added; a false one has to be retracted.
@@ -2890,7 +2884,7 @@ mod tests {
     fn the_fixture_the_backend_actually_wrote_parses() {
         let written = include_str!("../tests/fixtures/subagent-registry.json");
         let found = parse_registry(written);
-        assert_eq!(found.len(), 10, "{found:#?}");
+        assert_eq!(found.len(), 9, "{found:#?}");
         let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
         // The three the request imagined, under the names the backend actually uses.
         assert!(names.contains(&"exploratory_data_analysis"), "{names:?}");
@@ -3433,8 +3427,8 @@ documents:
         // line visible, and a missing line is the run that never happened.
         let clean = &claims[0];
         assert_eq!(clean.at, "2026-08-26T11:04:12Z");
-        assert_eq!(clean.source, "data_voyager");
-        assert_eq!(clean.schema, "DataAnalysisResults");
+        assert_eq!(clean.source, "autodiscovery");
+        assert_eq!(clean.schema, "DiscoveryRunResults");
         assert_eq!(clean.claimed, 4);
         assert!(clean.checked && !clean.contradicted() && !clean.used_outside());
         assert_eq!(clean.datasets, None, "it was never a dataverse question");

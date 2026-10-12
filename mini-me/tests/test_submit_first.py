@@ -11,14 +11,11 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from backend.middleware.submit_first import (
     DraftBeforeReporting,
-    ANALYZE_TOOL,
     THEORIZE_TOOL,
-    SubmitBeforeReporting,
     TheorizeBeforeReporting,
 )
 
 CASES = [
-    (SubmitBeforeReporting, ANALYZE_TOOL, "DataAnalysisResults"),
     (TheorizeBeforeReporting, THEORIZE_TOOL, "HypothesisOutput"),
 ]
 
@@ -53,11 +50,11 @@ def _seen(gate, messages, response_format):
 
 @pytest.mark.parametrize(("gate", "tool", "schema"), CASES)
 def test_the_first_call_cannot_be_the_artifact(gate, tool, schema):
-    """§230's failure, in the two subagents where it costs the most.
+    """§230's failure, where it costs the most.
 
-    A composed `DataAnalysisResults` carries findings, charts and hypotheses-tested, and looks
-    exactly like a twenty-minute analysis. The researcher waits for a panel that will never fill,
-    because no task was ever submitted.
+    A composed `HypothesisOutput` carries theories and papers, and looks exactly like a
+    twenty-minute theorizer run. The researcher waits for a panel that will never fill, because no
+    task was ever submitted.
     """
     out = _seen(gate, [HumanMessage(content="analyse the attached data")], schema)
     assert out["choice"] == tool
@@ -137,7 +134,6 @@ def test_the_gates_are_attached_to_exactly_the_two_subagents():
         data_cleaning_tools=[],
         diagnostic_tools=[],
         theory_tools=[],
-        datavoyager_tools=[],
         discovery_tools=[],
         file_sync=object(),
         sandbox_backend=Sandbox(),
@@ -147,80 +143,10 @@ def test_the_gates_are_attached_to_exactly_the_two_subagents():
     holding = lambda kind: {  # noqa: E731
         s["name"] for s in built if any(isinstance(m, kind) for m in s["middleware"])
     }
-    assert holding(SubmitBeforeReporting) == {"data_voyager"}
     assert holding(TheorizeBeforeReporting) == {"hypothesis_generator"}
     # And the third, added when AutoDiscovery arrived: the one whose fabricated artifact would
     # reach the credit gate rather than merely a waiting researcher.
     assert holding(DraftBeforeReporting) == {"autodiscovery"}
-
-
-# --- the guidance the working run produced (§239) ------------------------------------------------
-
-def test_the_prompt_asks_for_the_four_things_that_changed_the_outcome():
-    """Measured, not asserted. A question meeting these four fitted models; one missing the last
-    came back as a preprocessing plan with nothing fitted.
-
-    Pinned as a test because prompt text is the easiest thing in this repository to lose in an
-    edit, and the cost of losing it is a twenty-minute run that answers in prose.
-    """
-    from backend.subagents import DATA_VOYAGER_SYSTEM_PROMPT as prompt
-
-    assert "NAME THE DATASETS" in prompt
-    assert "NAME THE METHODS" in prompt
-    assert "ASK FOR THE NUMBERS" in prompt
-    assert "SAY TO RUN IT" in prompt
-    # And the example, because a rule with no instance is a rule people interpret.
-    assert "Actually run the code and report the numbers" in prompt
-
-
-def test_the_prompt_defaults_to_a_fresh_session():
-    """DataVoyager reasons over a context's whole history, so a question asked inside a session
-    about something else is answered in the light of that other thing — which is how one run
-    declined to fit anything at all."""
-    from backend.subagents import DATA_VOYAGER_SYSTEM_PROMPT as prompt
-
-    assert "pass NO `context_id`" in prompt
-    assert "ONLY when the user is explicitly continuing" in prompt
-
-
-def test_the_log_says_whether_the_session_was_reused():
-    """Requested in the prompt, recorded in the log — so a run that ignored the request is visible
-    rather than merely disappointing."""
-    import asyncio
-    import json as _json
-    from types import SimpleNamespace
-
-    from backend.datavoyager_tools import analyze_data
-
-    record = {"id": "4ee871fd-64cc-48a7-947b-6baca0e95e4c", "contextId": "ctx-9"}
-    seen: list[str] = []
-
-    class Sandbox:
-        async def aexecute(self, command, timeout=None):
-            seen.append(command)
-            return SimpleNamespace(exit_code=0, output=_json.dumps(record))
-
-    question = "Fit and compare ridge and random forest predicting y from x.csv, report R2."
-    from backend.runtime import _active_sandbox
-
-    token = _active_sandbox.set(Sandbox())
-    try:
-        fresh = _json.loads(
-            asyncio.run(analyze_data.ainvoke({"question": question, "dataset_paths": "x.csv"}))
-        )
-        assert fresh["status"] == "running"
-        # A reused session still works; the point is that it is distinguishable.
-        again = _json.loads(
-            asyncio.run(
-                analyze_data.ainvoke(
-                    {"question": question, "dataset_paths": "x.csv", "context_id": "ctx-9"}
-                )
-            )
-        )
-        assert again["status"] == "running"
-        assert "--context-id" in seen[-1] and "--context-id" not in seen[0]
-    finally:
-        _active_sandbox.reset(token)
 
 
 # --- the third gate, where the stakes are money (§248) --------------------------------------------
@@ -247,11 +173,11 @@ def test_the_autodiscovery_prompt_says_it_cannot_start_a_run():
     assert "steering" in prompt
 
 
-def test_autodiscovery_is_told_the_difference_from_data_voyager():
-    """Two tools over the same file, and picking wrong wastes either credits or a good question."""
+def test_autodiscovery_is_told_when_another_specialist_fits_better():
+    """A question the user can already state does not need credits spent on it."""
     from backend.subagents import AUTODISCOVERY_SYSTEM_PROMPT as prompt
 
-    assert "data_voyager" in prompt
+    assert "diagnostic_analytics" in prompt
     assert "decides its own questions" in prompt
 
 

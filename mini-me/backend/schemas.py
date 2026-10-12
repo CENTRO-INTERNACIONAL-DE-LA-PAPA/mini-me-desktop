@@ -196,27 +196,6 @@ class LibraryArtifact(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
-# DataVoyager (analyze-data) response models
-# ---------------------------------------------------------------------------
-
-class DataFinding(BaseModel):
-    """A single insight DataVoyager produced from analyzing the dataset."""
-
-    title: str = Field(description="Short headline for the finding.")
-    detail: str = Field(
-        default="",
-        description="1–2 sentence explanation of the finding and what supports it.",
-    )
-    chart_path: str | None = Field(
-        default=None,
-        description=(
-            "Relative sandbox path to the chart/figure backing this finding, when "
-            "one was produced (e.g. './analysis_corr.png')."
-        ),
-    )
-
-
 class DerivedRef(BaseModel):
     """A declared upstream input a subagent built on (P4 provenance, "declared").
 
@@ -230,7 +209,7 @@ class DerivedRef(BaseModel):
     kind: str = Field(
         description=(
             "Artifact kind of the input: 'hypothesis' (a theory set, keyed by its "
-            "research question), 'dataset', 'source'/'paper', 'analysis', or 'file'."
+            "research question), 'dataset', 'source'/'paper', or 'file'."
         ),
     )
     ref: str = Field(
@@ -301,56 +280,6 @@ class DiscoveryRunResults(BaseModel):
         description=(
             "Upstream artifacts the run was built on — normally the dataset "
             "(kind='dataset'/'file'). Leave empty when there is no upstream artifact."
-        ),
-    )
-
-
-class DataAnalysisResults(BaseModel):
-    """A DataVoyager (`asta analyze-data`) run: hypotheses tested against data."""
-
-    question: str = Field(description="The analytical question DataVoyager answered.")
-    dataset_paths: List[str] = Field(
-        default_factory=list,
-        description="Local dataset path(s) that were analyzed.",
-    )
-    summary: str = Field(
-        default="",
-        description="Short narrative synthesis of what the analysis found.",
-    )
-    findings: List[DataFinding] = Field(
-        default_factory=list,
-        description="Key insights, each optionally linked to a produced chart.",
-    )
-    hypotheses_tested: List[str] = Field(
-        default_factory=list,
-        description=(
-            "Hypotheses the run generated and/or evaluated against the data, with "
-            "the verdict where the evidence settled it."
-        ),
-    )
-    charts: List[str] = Field(
-        default_factory=list,
-        description="Relative sandbox paths to charts/figures the run produced.",
-    )
-    status: str = Field(
-        default="completed",
-        description="Run lifecycle: 'running', 'completed', 'failed', or 'input-required'.",
-    )
-    task_id: str | None = Field(
-        default=None,
-        description="Asta DataVoyager task id, for resuming a still-running run.",
-    )
-    context_id: str | None = Field(
-        default=None,
-        description="DataVoyager session id, used to ask follow-ups against the same workspace.",
-    )
-    derived_from: List[DerivedRef] = Field(
-        default_factory=list,
-        description=(
-            "Upstream artifacts this analysis was built on — e.g. the theory/theories "
-            "it tested (kind='hypothesis', ref=the research question) and the dataset "
-            "(kind='dataset'/'file'). Used to draw provenance edges; leave empty when "
-            "there is no upstream artifact."
         ),
     )
 
@@ -429,24 +358,6 @@ class LibraryArtifactPayload(TypedDict):
     index_path: str
     papers: list[IndexedPaperPayload]
     query_hint: str
-
-
-class DataFindingPayload(TypedDict):
-    title: str
-    detail: NotRequired[str]
-    chart_path: NotRequired[str | None]
-
-
-class DataAnalysisArtifactPayload(TypedDict):
-    question: str
-    dataset_paths: list[str]
-    summary: str
-    findings: list[DataFindingPayload]
-    hypotheses_tested: list[str]
-    charts: list[str]
-    status: NotRequired[str]
-    task_id: NotRequired[str | None]
-    context_id: NotRequired[str | None]
 
 
 class DiscoveryRunArtifactPayload(TypedDict):
@@ -528,7 +439,6 @@ class ArtifactBundle(TypedDict):
     # the reducer reads every slice via .get(..., []).
     hypotheses: NotRequired[list[HypothesisArtifactPayload]]
     libraries: NotRequired[list[LibraryArtifactPayload]]
-    analyses: NotRequired[list[DataAnalysisArtifactPayload]]
     discoveries: NotRequired[list[DiscoveryRunArtifactPayload]]
     # Single object, not a list: the reducer keeps the most recent one
     # (last-write-wins) rather than deduping/appending.
@@ -638,13 +548,6 @@ def _merge_artifacts(
         "libraries": _merge_libraries(
             [*left.get("libraries", []), *right.get("libraries", [])]
         ),
-        "analyses": _dedupe_artifacts(
-            [*left.get("analyses", []), *right.get("analyses", [])],
-            # Keyed by question (like hypotheses) so a running→completed update for
-            # the same question refreshes in place, while a follow-up (a distinct
-            # question) accumulates as its own entry.
-            keys=("question",),
-        ),
         "discoveries": _dedupe_artifacts(
             [*left.get("discoveries", []), *right.get("discoveries", [])],
             # Keyed by the run id the service issued, not by the name: two runs over the same
@@ -701,7 +604,6 @@ _NODE_ID_FIELDS: dict[str, tuple[str, ...]] = {
     "file": ("path",),
     "hypothesis": ("question",),
     "library": ("index_path",),
-    "analysis": ("question",),
     # Keyed on the run id the service issued, matching the `discoveries` reducer. Missing it meant
     # `artifact_node_id("discovery", …)` returned a bare `discovery:` and every provenance edge for
     # a run was silently dropped — the same "unknown kind" fallthrough this map's comment warns of.
@@ -860,7 +762,7 @@ class ReportWriterOutput(BaseModel):
     derived_from: List[DerivedRef] = Field(
         default_factory=list,
         description=(
-            "Artifacts this report synthesizes — the theories, analyses, datasets, "
+            "Artifacts this report synthesizes — the theories, datasets, "
             "and sources it draws on (each with its natural key). Used to draw "
             "provenance edges; leave empty when the report cites no prior artifact."
         ),
@@ -892,7 +794,7 @@ class PlanStep(BaseModel):
             "Which subagent runs this step, as a friendly label: one of "
             "'Academic Research', 'Dataverse Explorer', 'Data Cleaning', "
             "'Exploratory Data Analysis', 'Diagnostic Analytics', 'Predictive "
-            "Analytics', 'Hypothesis Generator', 'PDF Librarian', 'DataVoyager', "
+            "Analytics', 'Hypothesis Generator', 'PDF Librarian', "
             "'AutoDiscovery', or 'Report Writer'."
         ),
     )

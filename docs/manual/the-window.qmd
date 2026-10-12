@@ -43,8 +43,8 @@ scroll through the chat to find it:
 - **Datasets** — CIP Dataverse datasets recommended for your question, and where to download them.
 - **Sources** — the papers and references that were used.
 - **PDF Library** — the PDFs the PDF Librarian has read for this conversation.
-- **Hypotheses**, **Analyses** and **Discoveries** — ideas, tested findings and AutoDiscovery
-  runs, when those specialists have worked.
+- **Hypotheses** and **Discoveries** — ideas and AutoDiscovery runs, when those specialists
+  have worked.
 
 You can hide or show the Pinboard with the button at its top. See
 [Your results](results.qmd).

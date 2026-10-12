@@ -7,10 +7,10 @@ summary — having executed nothing (§230). Not a subtle failure and not an unl
 `middleware/tool_gate.py` describes, which every subagent carrying a `response_format` has unless
 something closes it.
 
-`data_voyager` and `hypothesis_generator` have the same shape and one difference that matters: **both
-submit a job and then report on it.** Their artifacts carry a `task_id`, a `status` and — once
-complete — findings, charts, theories and papers. A model that composes one has produced something
-that looks exactly like a twenty-minute analysis and cost nothing, and the researcher waiting for the
+`hypothesis_generator` has the same shape and one difference that matters: **it submits a job
+and then reports on it.** Its artifact carries a `task_id`, a `status` and — once complete —
+theories and papers. A model that composes one has produced something that looks exactly like a
+twenty-minute run and cost nothing, and the researcher waiting for the
 panel to fill will wait for a task that was never submitted.
 
 So the claim enforced is narrow and mechanical: **you cannot report a run you did not start.**
@@ -39,8 +39,8 @@ free and reversible; the thing downstream of it is neither.
 
 # Checking is starting
 
-Both tools double as their own status check — `analyze_data(resume_task_id=…)` and
-`generate_theories(resume_task_id=…)`. Satisfying the gate that way is correct: a subagent asked to
+The theorizer tool doubles as its own status check — `generate_theories(resume_task_id=…)`.
+Satisfying the gate that way is correct: a subagent asked to
 check a specific run has engaged with a real task id, which is the thing being insisted on.
 """
 
@@ -48,26 +48,12 @@ from __future__ import annotations
 
 from backend.middleware.tool_gate import Step, ToolsBeforeAnswering
 
-#: The tool that submits a DataVoyager run (`backend/datavoyager_tools.py`).
-ANALYZE_TOOL = "analyze_data"
-
 #: The tool that submits an Asta Theorizer run (`backend/theory_tools.py`).
 THEORIZE_TOOL = "generate_theories"
 
 #: The tool that prepares an AutoDiscovery run (`backend/autodiscovery_tools.py`). Note that it
 #: *drafts* — there is deliberately no tool that submits one, because submitting spends credits.
 DRAFT_TOOL = "draft_discovery_run"
-
-
-class SubmitBeforeReporting(ToolsBeforeAnswering):
-    """`data_voyager` must submit an analysis before `DataAnalysisResults` is reachable."""
-
-    steps = (
-        Step(
-            force=ANALYZE_TOOL,
-            because="data_voyager has not submitted an analysis, so it has no run to report",
-        ),
-    )
 
 
 class TheorizeBeforeReporting(ToolsBeforeAnswering):

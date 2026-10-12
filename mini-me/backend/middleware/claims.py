@@ -9,8 +9,8 @@ subagent that writes nothing and says otherwise is indistinguishable from one th
 
 The two failures this catches are different from each other and both are silent:
 
-* **A file that was never written.** `DataAnalysisResults.charts`, `LibraryArtifact.papers[].path`
-  and the image refs inside a report are all *paths the model typed*. Nothing has ever checked
+* **A file that was never written.** `LibraryArtifact.papers[].path` and the image refs inside a
+  report are both *paths the model typed*. Nothing has ever checked
   that a file is there. A report that embeds `![Distribution](./eda_dist.png)` renders as a broken
   image in the PDF, and the researcher finds out at the end.
 * **A dataset that was never in the search.** Every `DataVerseFindings` requires a
@@ -77,14 +77,6 @@ logger = diagnostics.arriving(__name__)
 #:
 #: `[]` means "each element of this list". Resolution is `_resolve`.
 CLAIMED_PATHS: dict[str, tuple[str, ...]] = {
-    "DataAnalysisResults": (
-        "charts[]",
-        "findings[].chart_path",
-        # The inputs, checked as well as the outputs: an analysis run against a dataset path that
-        # does not exist is precisely the silent failure this file is for, and DataVoyager reports
-        # the paths it was *given*, not the ones it opened.
-        "dataset_paths[]",
-    ),
     "LibraryArtifact": (
         "index_path",
         "papers[].path",

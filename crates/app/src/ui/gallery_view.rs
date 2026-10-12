@@ -1897,7 +1897,6 @@ impl Workbench {
             self.sources_pinboard_section(cx),
             self.library_pinboard_section(cx),
             self.bucket_pinboard_section("hypotheses", "Hypotheses"),
-            self.bucket_pinboard_section("analyses", "Analyses"),
             self.bucket_pinboard_section("discoveries", "Discoveries"),
         ]
         .into_iter()

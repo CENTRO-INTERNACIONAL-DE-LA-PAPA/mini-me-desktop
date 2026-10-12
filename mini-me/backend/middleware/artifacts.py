@@ -1,7 +1,6 @@
 """Middleware that exposes structured subagent output as frontend artifacts."""
 
 import uuid
-from pathlib import PurePosixPath
 from typing import Any
 
 from langgraph.runtime import Runtime
@@ -125,33 +124,9 @@ def _edges_for_library(structured: Any) -> list[dict[str, Any]]:
     return edges
 
 
-def _edges_for_analysis(structured: Any) -> list[dict[str, Any]]:
-    """analysis --analyzes--> file, for every dataset path it ran on."""
-    question = getattr(structured, "question", "")
-    src = artifact_node_id("analysis", {"question": question})
-    edges: list[dict[str, Any]] = []
-    for path in getattr(structured, "dataset_paths", []):
-        if not path:
-            continue
-        name = PurePosixPath(str(path)).name or str(path)
-        edge = _edge(
-            src,
-            artifact_node_id("file", {"path": path}),
-            "analyzes",
-            source_kind="analysis",
-            target_kind="file",
-            source_label=question or "Analysis",
-            target_label=name,
-        )
-        if edge is not None:
-            edges.append(edge)
-    return edges
-
-
 # Friendly display names for the subagent that produced an artifact.
 _SUBAGENT_LABELS = {
     "hypothesis_generator": "Theorizer",
-    "data_voyager": "DataVoyager",
     "pdf_librarian": "PDF Librarian",
     "report_writer": "Report writer",
     "academic_researcher": "Academic search",
@@ -424,64 +399,6 @@ class ArtifactCaptureMiddleware(AgentMiddleware[ArtifactState, Any, Any]):
                         ]
                         if e is not None
                     ],
-                }
-            }
-
-        if self.source == "data_voyager":
-            return {
-                "artifacts": {
-                    "datasets": [],
-                    "sources": [],
-                    "reports": [],
-                    "files": [],
-                    "analyses": [
-                        {
-                            "question": getattr(structured, "question", ""),
-                            "dataset_paths": list(
-                                getattr(structured, "dataset_paths", [])
-                            ),
-                            "summary": getattr(structured, "summary", ""),
-                            "findings": [
-                                {
-                                    "title": getattr(finding, "title", ""),
-                                    "detail": getattr(finding, "detail", ""),
-                                    "chart_path": getattr(finding, "chart_path", None),
-                                }
-                                for finding in getattr(structured, "findings", [])
-                            ],
-                            "hypotheses_tested": list(
-                                getattr(structured, "hypotheses_tested", [])
-                            ),
-                            "charts": list(getattr(structured, "charts", [])),
-                            "status": getattr(structured, "status", "completed"),
-                            "task_id": getattr(structured, "task_id", None),
-                            "context_id": getattr(structured, "context_id", None),
-                        }
-                    ],
-                    "edges": _edges_for_analysis(structured)
-                    + [
-                        e
-                        for e in [
-                            _produced_by_edge(
-                                artifact_node_id(
-                                    "analysis",
-                                    {"question": getattr(structured, "question", "")},
-                                ),
-                                "analysis",
-                                getattr(structured, "question", ""),
-                                "data_voyager",
-                            )
-                        ]
-                        if e is not None
-                    ]
-                    + _declared_edges(
-                        artifact_node_id(
-                            "analysis", {"question": getattr(structured, "question", "")}
-                        ),
-                        "analysis",
-                        getattr(structured, "question", ""),
-                        getattr(structured, "derived_from", []),
-                    ),
                 }
             }
 

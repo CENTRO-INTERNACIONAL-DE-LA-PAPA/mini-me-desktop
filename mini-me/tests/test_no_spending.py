@@ -149,7 +149,6 @@ def test_the_guard_is_attached_to_the_coordinator_and_every_subagent():
         data_cleaning_tools=[],
         diagnostic_tools=[],
         theory_tools=[],
-        datavoyager_tools=[],
         discovery_tools=[],
         file_sync=object(),
         sandbox_backend=Sandbox(),

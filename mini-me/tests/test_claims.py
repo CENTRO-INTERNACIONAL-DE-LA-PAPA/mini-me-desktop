@@ -34,9 +34,8 @@ from backend.middleware.claims import (
 )
 from backend.middleware.dataverse_first import FIXED_FILENAME
 from backend.schemas import (
-    DataAnalysisResults,
-    DataFinding,
     DataVerseFindings,
+    DiscoveryRunResults,
     DataVerseSearchResults,
     IndexedPaper,
     LibraryArtifact,
@@ -129,31 +128,27 @@ def recorded():
 # Paths a subagent typed
 # ---------------------------------------------------------------------------
 
-def test_a_chart_that_was_never_written_is_named(recorded):
+def test_a_path_that_was_never_written_is_named(recorded):
     """§207a in miniature: the response names four paths and two of them are not there."""
-    analysis = DataAnalysisResults(
-        question="does yield track rainfall",
-        dataset_paths=["data/trials.csv"],
-        charts=["analysis/corr.png", "analysis/resid.png"],
-        findings=[DataFinding(title="Correlated", chart_path="./analysis/scatter.png")],
+    run = DiscoveryRunResults(
+        name="does yield track rainfall",
+        dataset_paths=["data/trials.csv", "data/rain.csv", "data/soil.csv", "./data/plots.csv"],
     )
-    sandbox = FakeSandbox(entries=["data/trials.csv", "analysis/corr.png"])
-    assert record("data_voyager", analysis, sandbox) is None
+    sandbox = FakeSandbox(entries=["data/trials.csv", "data/rain.csv"])
+    assert record("autodiscovery", run, sandbox) is None
     line = "\n".join(recorded)
     assert "2 not in the workspace" in line
-    assert "analysis/resid.png" in line
-    assert "analysis/scatter.png" in line
+    assert "data/soil.csv" in line
+    assert "data/plots.csv" in line
     # The two that are there must not be named, or the record stops being readable.
-    assert "corr.png," not in line and "trials.csv" not in line
+    assert "rain.csv" not in line and "trials.csv" not in line
 
 
 def test_every_path_present_is_recorded_as_such(recorded):
     """The clean case has to be visible too — silence would read as 'never ran'."""
-    analysis = DataAnalysisResults(
-        question="q", charts=["analysis/a.png"], dataset_paths=["d.csv"]
-    )
-    sandbox = FakeSandbox(entries=["analysis/a.png", "d.csv"])
-    record("data_voyager", analysis, sandbox)
+    run = DiscoveryRunResults(name="q", dataset_paths=["data/a.csv", "d.csv"])
+    sandbox = FakeSandbox(entries=["data/a.csv", "d.csv"])
+    record("autodiscovery", run, sandbox)
     assert "named 2 paths, all present" in "\n".join(recorded)
 
 
@@ -323,10 +318,10 @@ def test_the_recorder_reads_the_file_both_dataverse_tools_agree_on():
 
 def test_a_broken_sandbox_costs_the_record_and_not_the_turn(recorded):
     """The whole point of `aafter_agent` returning None on every path."""
-    analysis = DataAnalysisResults(question="q", charts=["a.png"])
+    run = DiscoveryRunResults(name="q", dataset_paths=["a.csv"])
     sandbox = FakeSandbox(explode=True)
-    assert record("data_voyager", analysis, sandbox) is None
-    assert "recording data_voyager failed" in "\n".join(recorded)
+    assert record("autodiscovery", run, sandbox) is None
+    assert "recording autodiscovery failed" in "\n".join(recorded)
 
 
 def test_the_record_arrives_whatever_the_root_log_level_is(recorded):
@@ -343,9 +338,9 @@ def test_the_record_arrives_whatever_the_root_log_level_is(recorded):
     root.setLevel(logging.CRITICAL)
     try:
         record(
-            "data_voyager",
-            DataAnalysisResults(question="q", charts=["a.png"]),
-            FakeSandbox(entries=["a.png"]),
+            "autodiscovery",
+            DiscoveryRunResults(name="q", dataset_paths=["a.csv"]),
+            FakeSandbox(entries=["a.csv"]),
         )
     finally:
         root.setLevel(previous)
@@ -399,7 +394,7 @@ def test_an_unrecognised_schema_is_recorded_as_uncovered(recorded):
         pass
 
     sandbox = FakeSandbox()
-    record("data_voyager", SomethingNew(), sandbox)
+    record("autodiscovery", SomethingNew(), sandbox)
     assert "no path rule covers" in "\n".join(recorded)
 
 
@@ -434,7 +429,6 @@ def test_the_recorder_is_attached_to_every_subagent_that_returns_a_schema():
         data_cleaning_tools=[],
         diagnostic_tools=[],
         theory_tools=[],
-        datavoyager_tools=[],
         discovery_tools=[],
         file_sync=object(),
         sandbox_backend=FakeSandbox(),
@@ -526,7 +520,7 @@ def test_a_schema_nobody_checked_is_not_a_clean_bill_of_health():
     which is the failure `NO_PATHS` exists to make visible rather than to hide.
     """
     unchecked = entry("hypothesis_generator", "HypothesisOutput", at=AT, checked=False)
-    clean = entry("data_voyager", "DataAnalysisResults", at=AT, checked=True, claimed=3)
+    clean = entry("autodiscovery", "DiscoveryRunResults", at=AT, checked=True, claimed=3)
     assert unchecked["missing"] == clean["missing"] == []
     assert unchecked["checked"] is not clean["checked"]
     assert unchecked["claimed"] == 0 and clean["claimed"] == 3
@@ -535,7 +529,7 @@ def test_a_schema_nobody_checked_is_not_a_clean_bill_of_health():
 def test_a_dataverse_run_that_recommended_nothing_is_not_a_run_that_was_never_asked():
     """`datasets: 0` against `datasets: null` — §220's morning, in one field."""
     asked = entry("dataverse_explorer", "DataVerseSearchResults", at=AT, checked=True, datasets=0)
-    never = entry("data_voyager", "DataAnalysisResults", at=AT, checked=True)
+    never = entry("autodiscovery", "DiscoveryRunResults", at=AT, checked=True)
     assert asked["datasets"] == 0
     assert never["datasets"] is None
 
@@ -559,7 +553,7 @@ def test_a_work_dir_on_another_machine_is_not_built_here(tmp_path, recorded):
     on a machine that never ran the turn.
     """
     elsewhere = tmp_path / "not-here" / "019ff651"
-    _write(elsewhere, entry("data_voyager", "DataAnalysisResults", at=AT, checked=True))
+    _write(elsewhere, entry("autodiscovery", "DiscoveryRunResults", at=AT, checked=True))
     assert not elsewhere.exists(), "the folder must not be conjured"
     assert any("not a folder on this machine" in line for line in recorded), (
         "and skipping it silently is the thing this module was written against"
@@ -575,21 +569,19 @@ def test_every_structured_answer_is_recorded_even_the_clean_ones(tmp_path):
     """
     from backend.local import ledger
 
-    clean = DataAnalysisResults(
-        question="does yield track rainfall",
-        dataset_paths=["data/trials.csv"],
-        charts=["analysis/corr.png"],
-        findings=[],
+    clean = DiscoveryRunResults(
+        name="does yield track rainfall",
+        dataset_paths=["data/trials.csv", "data/rain.csv"],
     )
-    sandbox = FakeSandbox(entries=["data/trials.csv", "analysis/corr.png"], work_dir=tmp_path)
-    assert record("data_voyager", clean, sandbox) is None
+    sandbox = FakeSandbox(entries=["data/trials.csv", "data/rain.csv"], work_dir=tmp_path)
+    assert record("autodiscovery", clean, sandbox) is None
 
     written = ledger.read(tmp_path, name=ledger.CLAIMS_NAME)
     assert len(written) == 1, "the clean answer is a line, not a silence"
     assert written[0]["missing"] == [] and written[0]["checked"] is True
     assert written[0]["claimed"] == 2
-    assert written[0]["source"] == "data_voyager"
-    assert written[0]["schema"] == "DataAnalysisResults"
+    assert written[0]["source"] == "autodiscovery"
+    assert written[0]["schema"] == "DiscoveryRunResults"
     assert written[0]["at"].endswith("Z"), "the same stamp the command record uses"
 
 
@@ -625,10 +617,8 @@ def test_a_broken_record_never_costs_the_turn(tmp_path, recorded):
 
     (tmp_path / ledger.RECORD_DIR).write_text("not a folder", encoding="utf-8")
     sandbox = FakeSandbox(entries=["data/trials.csv"], work_dir=tmp_path)
-    analysis = DataAnalysisResults(
-        question="q", dataset_paths=["data/trials.csv"], charts=[], findings=[]
-    )
-    assert record("data_voyager", analysis, sandbox) is None
+    run = DiscoveryRunResults(name="q", dataset_paths=["data/trials.csv"])
+    assert record("autodiscovery", run, sandbox) is None
 
 
 # ---------------------------------------------------------------------------
@@ -651,14 +641,14 @@ def _sample() -> list[dict]:
     """Five answers, covering every branch the client can render wrong.
 
     Real-ish rather than minimal. Each of these is a shape that has actually occurred: the clean
-    analysis, the librarian naming an index that is not there beside a PDF that is (§230), a
+    discovery draft, the librarian naming an index that is not there beside a PDF that is (§230), a
     schema no rule covers, a recommended dataset the search never returned, and a check that could
     not run at all (§224).
     """
     return [
         entry(
-            "data_voyager",
-            "DataAnalysisResults",
+            "autodiscovery",
+            "DiscoveryRunResults",
             at="2026-08-26T11:04:12Z",
             checked=True,
             claimed=4,
@@ -736,10 +726,8 @@ def test_the_recorder_writes_the_shape_the_fixture_declares(tmp_path):
     from backend.local import ledger
 
     sandbox = FakeSandbox(entries=["data/trials.csv"], work_dir=tmp_path)
-    analysis = DataAnalysisResults(
-        question="q", dataset_paths=["data/trials.csv"], charts=[], findings=[]
-    )
-    record("data_voyager", analysis, sandbox)
+    run = DiscoveryRunResults(name="q", dataset_paths=["data/trials.csv"])
+    record("autodiscovery", run, sandbox)
     written = ledger.read(tmp_path, name=ledger.CLAIMS_NAME)
     assert set(written[0]) == set(_sample()[0]), "the run and the fixture carry the same keys"
 
@@ -766,10 +754,10 @@ def test_a_record_that_could_not_be_written_is_a_warning(tmp_path, recorded):
     from backend.local import ledger
 
     (tmp_path / ledger.RECORD_DIR).write_text("not a folder", encoding="utf-8")
-    _write(tmp_path, entry("data_voyager", "DataAnalysisResults", at=AT, checked=True))
+    _write(tmp_path, entry("autodiscovery", "DiscoveryRunResults", at=AT, checked=True))
     line = "\n".join(recorded)
     assert "could not be written" in line
-    assert "data_voyager" in line
+    assert "autodiscovery" in line
     assert "Outputs panel" in line, "and says what the researcher will notice"
 
 
@@ -795,11 +783,9 @@ def test_the_record_is_written_off_the_event_loop(tmp_path, monkeypatch):
 
     monkeypatch.setattr(claims, "_write", spy)
 
-    analysis = DataAnalysisResults(
-        question="q", dataset_paths=["data/trials.csv"], charts=[], findings=[]
-    )
+    run = DiscoveryRunResults(name="q", dataset_paths=["data/trials.csv"])
     here = threading.current_thread().name
-    record("data_voyager", analysis, FakeSandbox(entries=["data/trials.csv"], work_dir=tmp_path))
+    record("autodiscovery", run, FakeSandbox(entries=["data/trials.csv"], work_dir=tmp_path))
 
     assert ran_on, "the record was never written at all"
     assert ran_on[0] != here, (

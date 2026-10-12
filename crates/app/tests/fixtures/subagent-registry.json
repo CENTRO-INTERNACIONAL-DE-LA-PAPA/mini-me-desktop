@@ -36,10 +36,6 @@
     {
       "name": "pdf_librarian",
       "description": "Build and query a local searchable library of the user's own PDFs and documents: OCR/extract text, index papers into a persistent local library, and run semantic search over them so other subagents can use the user's grey literature and institutional reports as grounded context."
-    },
-    {
-      "name": "data_voyager",
-      "description": "Run the Asta DataVoyager pipeline (`asta analyze-data`) to generate and test hypotheses against a local tabular dataset: it writes and executes code in a sandboxed notebook to answer a specific analytical question and returns findings, charts, and the hypotheses it evaluated. Use it to test theories or questions against the user's own data."
     }
   ]
 }

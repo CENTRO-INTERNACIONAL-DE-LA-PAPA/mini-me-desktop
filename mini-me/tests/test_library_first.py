@@ -100,7 +100,6 @@ def test_the_gate_is_attached_to_the_librarian_and_to_nothing_else():
         data_cleaning_tools=[],
         diagnostic_tools=[],
         theory_tools=[],
-        datavoyager_tools=[],
         discovery_tools=[],
         file_sync=object(),
         sandbox_backend=Sandbox(),

@@ -1053,19 +1053,19 @@ mod tests {
         // theorizer run as three separate pieces of work (docs §111).
         let mut record = Record::default();
         record.begin_turn("analyse this", 0);
-        record.observe_background("async:t-1", "data_voyager", 100);
-        record.observe_background("async:t-1", "data_voyager", 400);
+        record.observe_background("async:t-1", "report_writer", 100);
+        record.observe_background("async:t-1", "report_writer", 400);
         record.begin_turn("anything running?", 1_000);
-        record.observe_background("async:t-1", "data_voyager", 1_100);
+        record.observe_background("async:t-1", "report_writer", 1_100);
         record.begin_turn("still?", 2_000);
-        record.observe_background("async:t-1", "data_voyager", 2_500);
+        record.observe_background("async:t-1", "report_writer", 2_500);
 
         // One entry, in the turn that started it, spanning the whole time it was alive.
         assert_eq!(record.turns[0].invocations.len(), 1);
         assert!(record.turns[1].invocations.is_empty());
         assert!(record.turns[2].invocations.is_empty());
         let task = &record.turns[0].invocations[0];
-        assert_eq!(task.name, "data_voyager");
+        assert_eq!(task.name, "report_writer");
         assert_eq!((task.first_seen, task.last_seen), (100, 2_500));
 
         // And it is one node, visited once — not three.
@@ -1078,9 +1078,9 @@ mod tests {
     fn a_second_background_task_is_its_own_invocation() {
         let mut record = Record::default();
         record.begin_turn("do two things", 0);
-        record.observe_background("async:t-1", "data_voyager", 100);
+        record.observe_background("async:t-1", "autodiscovery", 100);
         record.observe_background("async:t-2", "report_writer", 150);
-        record.observe_background("async:t-1", "data_voyager", 900);
+        record.observe_background("async:t-1", "autodiscovery", 900);
         record.observe_background("async:t-2", "report_writer", 950);
         assert_eq!(record.turns[0].invocations.len(), 2);
         // Overlapping, so no order is claimed between them — they were handed off together.
