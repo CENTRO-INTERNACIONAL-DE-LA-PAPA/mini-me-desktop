@@ -1821,11 +1821,34 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
 ///
 /// Attach-only is deliberately *not* in the list: that mode is opt-in and its message
 /// already names its own fix, so a setup pane would be answering a question nobody asked.
+/// The Asta row after its action finished cleanly, read from that run's own output: who signed
+/// in, and whether the account may generate theories (`preflight::ASTA_THEORY_MARKER`).
+///
+/// Lacking the theorizer permission is a warning, as it is when Setup checks: literature
+/// search works without it.
+fn asta_sign_in_result(output: &str) -> (preflight::State, String) {
+    let who = match preflight::asta_account(output) {
+        Some(email) => format!("Signed in as {email}"),
+        None => "Signed in".to_string(),
+    };
+    if output.contains(&format!("{}no", preflight::ASTA_THEORY_MARKER)) {
+        (
+            preflight::State::Warn,
+            format!("{who}, but this account can't generate research theories"),
+        )
+    } else {
+        (preflight::State::Pass, who)
+    }
+}
+
 /// One or two plain sentences for a failed Setup fix, shown in place of its log.
 ///
 /// Matched on the few failures that have a cause a researcher can act on; anything else gets
 /// a generic sentence, with the full output one click away under "Show details".
-fn failure_summary(check_id: &str, lines: &[String], stopped: bool) -> String {
+fn failure_summary(check_id: &str, lines: &[String], stopped: bool, timed_out: bool) -> String {
+    if timed_out {
+        return "Sign-in wasn't completed in 10 minutes. Press Retry to try again.".into();
+    }
     if stopped {
         return "Stopped before it finished.".into();
     }
@@ -2227,6 +2250,13 @@ struct RunningFix {
     /// Whether a failed fix's output is expanded. A successful one never shows it: finishing
     /// cleanly is the whole verdict, and its log only buries the ✓.
     show_details: bool,
+    /// Whether this fix signs in, and so prints a device-activation link worth catching.
+    scan_sign_in: bool,
+    /// Whether that link has been opened in the browser already. Once is help; every line
+    /// after it would be a new tab.
+    browser_opened: bool,
+    /// Stopped because the sign-in was not approved within [`ASTA_SIGN_IN_TIMEOUT`].
+    timed_out: bool,
     /// The way to stop it, for as long as there is a process to stop (docs §172).
     cancel: preflight::Cancel,
     /// Set once Stop has been pressed, so the pane can say *stopping* rather than claiming a
@@ -2237,6 +2267,11 @@ struct RunningFix {
 
 /// How much of a fix's output the pane keeps.
 const FIX_LOG_LINES: usize = 200;
+
+/// How long an Asta sign-in may wait for the researcher's approval in the browser. The CLI
+/// polls without a limit of its own, so without this a closed browser tab left Setup
+/// "installing" forever.
+const ASTA_SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// One editable primitive from an MCP elicitation form.
 struct McpElicitationField {
@@ -2402,6 +2437,8 @@ struct Workbench {
     /// A fix the app is running for the user: what it is, and what it has printed so far.
     /// While it is not `done`, every button that could move on is disabled (`setup_busy`).
     running_fix: Option<RunningFix>,
+    /// The timer that ends an Asta sign-in nobody approved. Dropping it cancels it.
+    asta_sign_in_deadline: Option<gpui::Task<()>>,
     onboarding_open: bool,
     /// The Get Started key step's "Test key" result: `None` until pressed.
     key_test: Option<KeyTest>,
@@ -2942,6 +2979,7 @@ impl Workbench {
             locally_done: HashMap::new(),
             restart_required: false,
             running_fix: None,
+            asta_sign_in_deadline: None,
             onboarding_open: false,
             key_test: None,
             key_tested: None,
@@ -3953,6 +3991,20 @@ impl Workbench {
 
     /// Mark the row a fix was for as done, from the fix's own success.
     fn finish_successful_fix(&mut self, check_id: &'static str, cx: &mut Context<Self>) {
+        if check_id == "asta" {
+            let output = self
+                .running_fix
+                .as_ref()
+                .map(|fix| fix.lines.join("\n"))
+                .unwrap_or_default();
+            let (state, detail) = asta_sign_in_result(&output);
+            self.mark_check_done("asta", state, detail);
+            // The backend reads the Asta token when it starts (`backend::mint_asta_token`), so
+            // a sign-in only reaches it through a restart. Done here instead of asking the
+            // researcher to close and reopen the app.
+            self.restart_backend_with(false, cx);
+            return;
+        }
         if check_id == "runtime" && cfg!(windows) {
             // `wsl --install` exits 0 with the distro still unregistered until Windows
             // restarts, so the row cannot honestly be green yet (docs §60).
@@ -4034,8 +4086,28 @@ impl Workbench {
             done: false,
             ok: false,
             show_details: false,
+            scan_sign_in: check_id == "asta",
+            browser_opened: false,
+            timed_out: false,
             cancel: cancel.clone(),
             stopping: false,
+        });
+        self.asta_sign_in_deadline = (check_id == "asta").then(|| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(ASTA_SIGN_IN_TIMEOUT).await;
+                let _ = this.update(cx, |workbench, cx| {
+                    let waiting = workbench
+                        .running_fix
+                        .as_ref()
+                        .is_some_and(|fix| fix.check_id == "asta" && !fix.done);
+                    if waiting {
+                        if let Some(fix) = workbench.running_fix.as_mut() {
+                            fix.timed_out = true;
+                        }
+                        workbench.stop_fix(cx);
+                    }
+                });
+            })
         });
         let mut events = events;
         cx.spawn(async move |this, cx| {
@@ -4051,12 +4123,24 @@ impl Workbench {
                             // browser there. Catching the URL is what lets the app open it
                             // on the host, where the browser is (docs §32c).
                             //
-                            // Only for a sign-in. Every other fix's URLs are output, not a
-                            // page to visit: "Install the Asta CLI" prints uv's
+                            // Only for a sign-in, and only a link that carries a device code.
+                            // Every other URL is output, not a page to visit: the Asta action
+                            // installs first, and uv prints
                             // `(from git+https://github.com/allenai/asta-plugins.git@<sha>)`,
-                            // which became an "Open sign-in page" button pointing at GitHub.
-                            if fix.link.is_none() && fix.label.contains("Sign in") {
-                                fix.link = first_url(&line);
+                            // which once became an "Open sign-in page" button pointing at GitHub.
+                            if fix.scan_sign_in && fix.link.is_none() {
+                                fix.link = first_url(&line)
+                                    .filter(|link| device_code(link).is_some());
+                            }
+                            // Opened for the researcher rather than left behind a button:
+                            // approving in the browser is the only thing they have to do.
+                            if !fix.browser_opened {
+                                if let Some(link) = fix.link.clone() {
+                                    fix.browser_opened = true;
+                                    if let Err(error) = open_in_browser(&link) {
+                                        tracing::warn!(%error, "could not open the sign-in page");
+                                    }
+                                }
                             }
                             fix.lines.push(line);
                             if fix.lines.len() > FIX_LOG_LINES {
@@ -4070,6 +4154,9 @@ impl Workbench {
                             fix.notes.push(format!("— {note}"));
                             workbench.status =
                                 format!("{}: {note}", if ok { "done" } else { "failed" });
+                            if check_id == "asta" {
+                                workbench.asta_sign_in_deadline = None;
+                            }
                             if ok {
                                 workbench.finish_successful_fix(check_id, cx);
                             }
@@ -10979,12 +11066,13 @@ mod tests {
     #[test]
     fn a_failed_setup_fix_is_explained_in_a_sentence_not_a_log() {
         let lines = |text: &[&str]| text.iter().map(|line| line.to_string()).collect::<Vec<_>>();
-        assert!(failure_summary("asta", &[], true).starts_with("Stopped"));
+        assert!(failure_summary("asta", &[], true, false).starts_with("Stopped"));
         // The elevated WSL install runs in its own window and prints nothing here.
-        assert!(failure_summary("runtime", &[], false).contains("Administrator approval"));
+        assert!(failure_summary("runtime", &[], false, false).contains("Administrator approval"));
         assert!(failure_summary(
             "asta",
             &lines(&["error: Failed to fetch: `https://github.com/allenai/asta-plugins.git`"]),
+            false,
             false,
         )
         .contains("internet connection"));
@@ -10992,12 +11080,38 @@ mod tests {
             "dependencies",
             &lines(&["curl: (6) Could not resolve host: pypi.org"]),
             false,
+            false,
         )
         .contains("download failed"));
         assert_eq!(
-            failure_summary("checkout", &lines(&["something nobody planned for"]), false),
+            failure_summary("checkout", &lines(&["something nobody planned for"]), false, false),
             "The installer stopped with an error."
         );
+    }
+
+    #[test]
+    fn an_abandoned_sign_in_says_so_rather_than_stopped() {
+        // A timeout is also a stop, and the timeout is the reason worth giving.
+        assert!(failure_summary("asta", &[], true, true).contains("10 minutes"));
+    }
+
+    #[test]
+    fn the_asta_row_is_decided_from_its_own_run() {
+        let status = "│ Local Token Status   │ ✅ Valid                     │
+│ Email                │ researcher@example.org       │
+";
+        let (state, detail) =
+            asta_sign_in_result(&format!("{status}{}yes", preflight::ASTA_THEORY_MARKER));
+        assert_eq!(state, preflight::State::Pass);
+        assert_eq!(detail, "Signed in as researcher@example.org");
+
+        // Without the theorizer permission: still done, because literature search works.
+        let (state, detail) =
+            asta_sign_in_result(&format!("{status}{}no", preflight::ASTA_THEORY_MARKER));
+        assert_eq!(state, preflight::State::Warn);
+        assert!(detail.contains("can't generate research theories"), "{detail}");
+
+        assert_eq!(asta_sign_in_result("").1, "Signed in");
     }
 
     #[test]

@@ -173,7 +173,7 @@ impl Workbench {
         };
         let detail = match (state, fix) {
             (RowState::InProgress, Some(fix)) => self.progress_detail(fix),
-            (RowState::Failed, Some(fix)) => failure_summary(check.id, &fix.lines, fix.stopping),
+            (RowState::Failed, Some(fix)) => failure_summary(check.id, &fix.lines, fix.stopping, fix.timed_out),
             (RowState::RestartRequired, _) => {
                 "Installed. Restart your computer to finish, then open Mini-Me again.".to_string()
             }
@@ -361,6 +361,10 @@ impl Workbench {
     fn progress_detail(&self, fix: &RunningFix) -> String {
         if fix.stopping {
             format!("{} — stopping…", fix.label)
+        } else if fix.scan_sign_in && fix.link.is_some() {
+            "Waiting for you to approve the sign-in in your browser…".to_string()
+        } else if fix.scan_sign_in {
+            "Installing Asta if needed, then starting sign-in…".to_string()
         } else {
             format!("{}…", fix.label)
         }

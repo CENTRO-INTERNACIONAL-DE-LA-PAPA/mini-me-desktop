@@ -1,13 +1,14 @@
 # First-time setup
 
 The first time you open Mini-Me, a window called **GET STARTED** appears. It checks your
-computer and installs everything Mini-Me needs. **You only have to press one button** — the app
-does the rest and stops only when it needs you.
+computer and lists everything Mini-Me needs. Anything missing has an **Install** button next to
+it: press it, and the step ends with a tick (✓) when it worked, or a cross (✗) with a short
+explanation and **Retry** when it didn't.
 
 ::: {.image-placeholder}
 **File:** `images/setup-get-started.png`\
-**Show:** The GET STARTED window as it first appears, with the list of steps and the
-*Get Started* button.
+**Show:** The GET STARTED window as it first appears, with the list of steps and their
+*Install* buttons.
 :::
 <!-- ![The Get Started window](images/setup-get-started.png) -->
 
@@ -20,14 +21,16 @@ does the rest and stops only when it needs you.
 
 ## How it works
 
-1. Click **Get Started**.
-2. The app goes through the list of steps from top to bottom.
-   - A step that is running shows its progress right underneath it.
-   - A finished step shrinks to a single line with a tick (✓).
-3. When a step needs you (for example, to sign in or paste a key), the app **pauses** and tells
-   you what to do. Do it, then click **Continue**.
-4. When every required step is done, the window says **Ready to run** and the button changes
-   to **Done**. Click it and you can start working.
+1. The app checks each step once. Steps that are ready show a tick (✓).
+2. For each step that isn't ready, press its button (for example **Install**, **Set up Asta** or
+   **Save key**). Work from the top down.
+   - While a step is installing, it shows a spinner, and **every other button is greyed out**
+     until it finishes. This is on purpose: leaving halfway would leave the setup broken.
+   - When it finishes, the step shows a tick (✓). Nothing else is shown when it works.
+   - If it fails, the step shows a cross (✗), one or two sentences saying what went wrong, and
+     **Retry**. **Show details** opens the technical output if someone helping you asks for it.
+3. When every required step has a tick, **Get started** becomes available. Click it and you can
+   start working.
 
 ::: {.callout-tip}
 Steps marked **Optional** can be skipped. Mini-Me still works without them, but some features
@@ -115,12 +118,15 @@ you start Mini-Me.
 
 **What you do:**
 
-1. The app may first install the Asta tool by itself (about a minute).
-2. Then it asks you to **sign in**. A short **code** appears in large letters, with a button
-   **Open the sign-in page**.
-3. Click the button. Your web browser opens the Asta sign-in page.
-4. Type or check the code, and sign in with your account.
-5. Go back to Mini-Me — it notices the sign-in by itself and continues.
+1. Press **Set up Asta** (or **Sign in to Asta** if the tool is already installed). That one
+   button does everything: it installs the Asta tool if needed (about a minute), then starts
+   the sign-in.
+2. Your web browser opens the Asta sign-in page by itself, and a short **code** appears in
+   large letters in Mini-Me.
+3. Check that the code matches, and sign in with your account.
+4. Go back to Mini-Me. The step finishes by itself and shows **Signed in as** your email.
+
+If you don't finish signing in within **10 minutes**, the step stops and shows **Retry**.
 
 ::: {.image-placeholder}
 **File:** `images/setup-asta-signin.png`\
@@ -130,8 +136,8 @@ you start Mini-Me.
 <!-- ![Signing in to Asta](images/setup-asta-signin.png) -->
 
 ::: {.callout-tip}
-If the browser doesn't open, click **Copy ⧉** next to the button and paste the link into your
-browser yourself.
+If the browser doesn't open, click **Open the sign-in page**, or **Copy ⧉** and paste the link
+into your browser yourself.
 :::
 
 If the step says your account **"can't generate research theories"**, literature search still
@@ -156,12 +162,10 @@ reinstall Mini-Me), then open it again.
 
 | Button | What it does |
 |---|---|
-| **Get Started** | Starts going through all the steps automatically. |
-| **Working…** | Shown while the app is busy. Just wait. |
-| **Continue** | Use it after you have done something the app asked you to do (for example, sign in). |
-| **Retry** | Shown when a step failed. Tries that step again. |
-| **Re-check instead** | Checks your computer again without running anything. |
-| **Done** | Everything required is ready. Closes the window. |
+| **Get started** | Available once every required step has a tick. Closes the window so you can start working. |
+| **Installing…** | Shown while a step is running. Every button waits until it finishes. |
+| **Retry** | Shown under a step that failed. Runs that step again. |
+| **Show details** | Shown under a step that failed. Opens the technical output. |
 | **Skip for now** | Closes the setup. You can open it again later (see below). |
 | **Stop** | Stops the step that is running right now. |
 
