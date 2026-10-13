@@ -2346,7 +2346,7 @@ struct Workbench {
     dismissed_suggestions: std::collections::HashSet<String>,
     /// Research outputs, from the latest `values` snapshot of the current run.
     buckets: Vec<Bucket>,
-    /// Long jobs (theorizer, DataVoyager) started by a turn and still being watched.
+    /// Long jobs (the theorizer) started by a turn and still being watched.
     /// Kept for the whole session so a finished one stays visible rather than vanishing.
     jobs: Vec<protocol::Job>,
     /// Work handed to a background Mini-Me, and whether it is stopped at the gate.
@@ -5417,7 +5417,7 @@ impl Workbench {
                     workbench
                         .transcript
                         .retain(|message| message.role != "mini-me" || !message.is_silent());
-                    // **And pick up any long run still going.** A theorizer or DataVoyager task
+                    // **And pick up any long run still going.** A theorizer task
                     // lives on Asta's own service, keyed by a task id the thread's artifacts
                     // carry — so closing the window never stopped the work, only our watching of
                     // it. The state we just fetched for the messages already holds those ids,
@@ -6008,8 +6008,8 @@ impl Workbench {
             .map(|name| name.to_ascii_lowercase())
             .collect();
 
-        // **A file a run has not finished writing is not a file that is missing.** DataVoyager and
-        // the theorizer submit and return immediately; their outputs land at
+        // **A file a run has not finished writing is not a file that is missing.** Long jobs such
+        // as the theorizer submit and return immediately; their outputs land at
         // `analysis/<task_id>.md` when the run reaches a terminal state, twenty to forty minutes
         // later. So the answer that says *"the results will appear in the Analysis panel when the
         // run completes"* was flagged for not holding a file it had just explained was forthcoming
@@ -7643,16 +7643,16 @@ impl Workbench {
 
     /// Long jobs still running, and the ones that finished this session.
     ///
-    /// The theorizer and DataVoyager return a task id immediately and finish minutes
+    /// The theorizer returns a task id immediately and finishes minutes
     /// later, so without this the answer to "is it still going?" was nothing at all —
     /// and, worse, nobody was collecting the result (docs §29).
     ///
     /// **Foldable, and bounded when open.** Asked for directly: *"we need to make the ui of
     /// background jobs plegable and scrolable. when we have a lot of text like for data voyager
     /// its disruptive at sight."* A job row carries the question it was launched with, and a
-    /// DataVoyager question is a paragraph *by design* — the four rules in `subagents.py` make it
-    /// name the datasets, name the methods and ask for the numbers — so one row could fill the
-    /// column and push `OUTPUTS` and `SOURCES` off the bottom of it. Three bounds, cheapest
+    /// DataVoyager question (that specialist has since been removed) was a paragraph *by
+    /// design* — the four rules in `subagents.py` made it name the datasets, name the methods
+    /// and ask for the numbers — so one row could fill the column and push `OUTPUTS` and `SOURCES` off the bottom of it. Three bounds, cheapest
     /// first: the question is clipped to [`JOB_QUESTION_CHARS`], the list scrolls within
     /// [`JOBS_BODY_HEIGHT`], and the section folds to a single line.
     ///
@@ -10291,6 +10291,19 @@ mod tests {
         assert!(fold_steps(&[]).is_empty());
     }
 
+    #[test]
+    fn commands_are_totalled_across_folds() {
+        let steps: Vec<String> = ["execute", "execute", "validate_dataset", "execute"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(command_total(&steps).as_deref(), Some("3 commands in total"));
+
+        // One command needs no total; its own line already says it.
+        assert_eq!(command_total(&["execute".to_string()]), None);
+        assert_eq!(command_total(&[]), None);
+    }
+
     /// The fallback for a backend that never streams a delegated namespace's own frames back:
     /// `message.agents` stays empty, so the dot beside the message has to read who was asked
     /// off the coordinator's own "delegating to X" step instead (§310).
@@ -11325,7 +11338,7 @@ mod tests {
         assert!(trace.text.chars().count() <= MAX_TRACE_CHARS + 1);
     }
 
-    /// §245: a DataVoyager question is a paragraph by design, and the row is one column wide.
+    /// §245: a long-job question can be a paragraph, and the row is one column wide.
     #[test]
     fn a_long_job_question_is_clipped_for_the_panel() {
         // The shape `subagents.py` asks the coordinator to write: datasets, methods, numbers.

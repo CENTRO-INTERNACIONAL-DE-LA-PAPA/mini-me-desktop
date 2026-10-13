@@ -66,6 +66,17 @@ pub(crate) fn fold_steps(steps: &[String]) -> Vec<String> {
 }
 
 
+/// The trace line totalling an agent's shell commands, when it ran more than one.
+///
+/// `fold_steps` only folds consecutive runs, so `execute ×3, validate_dataset, execute ×2` hides
+/// the total of five — and the total is what tells a researcher whether a run kept to its budget
+/// (`middleware/command_budget.py` refuses commands after ten).
+pub(crate) fn command_total(steps: &[String]) -> Option<String> {
+    let commands = steps.iter().filter(|step| step.as_str() == "execute").count();
+    (commands > 1).then(|| format!("{commands} commands in total"))
+}
+
+
 /// The specialist named in the most recent "delegating to X" step, if any.
 ///
 /// The coordinator's own record of who it handed the turn to — `protocol::with_attachments`'s
@@ -629,9 +640,16 @@ impl Workbench {
         for step in fold_steps(&message.steps) {
             list = list.child(step_line(&step));
         }
+        if let Some(total) = command_total(&message.steps) {
+            list = list.child(step_line(&total));
+        }
         for trace in &message.agents {
+            let name = trace.name.replace('_', " ");
             for step in fold_steps(&trace.steps) {
-                list = list.child(step_line(&format!("{}: {step}", trace.name.replace('_', " "))));
+                list = list.child(step_line(&format!("{name}: {step}")));
+            }
+            if let Some(total) = command_total(&trace.steps) {
+                list = list.child(step_line(&format!("{name}: {total}")));
             }
         }
         list

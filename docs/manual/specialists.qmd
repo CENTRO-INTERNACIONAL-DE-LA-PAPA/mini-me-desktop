@@ -13,7 +13,7 @@ the team can do.
 | **Academic Researcher** | Searches scientific papers and summarises what they say, with references and links. | *What does the literature say about…?* |
 | **Dataverse Explorer** | Searches the CIP Dataverse for datasets and tells you which ones fit. | *Find datasets about potato trials in Kenya.* |
 | **PDF Librarian** | Reads the PDFs you give it and builds a small library you can search by meaning. | *Which of my PDFs talk about soil moisture?* |
-| **Data Cleaning** | Checks your data file for problems (missing values, typos, odd names) and makes a clean copy. Your original stays as it was. Every check is run with Pointblank, and its full report is saved as a web page you can open from the conversation's files. | *Clean this file and tell me what you fixed.* |
+| **Data Cleaning** | Checks your data file for problems (missing values, typos, odd names) and makes a clean copy. Your original stays as it was. Every check is run with Pointblank, and its full report is saved as a web page you can open from the conversation's files. It works in a few saved scripts (in `cleaning/`) rather than many small commands, and stops after 10 commands. | *Clean this file and tell me what you fixed.* |
 | **Exploratory Data Analysis** | Describes your data: summaries, missing values, unusual values, and charts. | *Show me what is in this data, with charts.* |
 | **Diagnostic Analytics** | Looks into *why* something happened, using comparisons and statistics. | *Why did yield drop in 2022?* |
 | **Predictive Analytics** | Builds and compares models that predict an outcome, and tells you how reliable they are. | *Predict yield from rainfall and temperature.* |
