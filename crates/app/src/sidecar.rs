@@ -1498,8 +1498,8 @@ impl Sidecar {
 
     /// Watch one long job until it stops moving, reporting every status change.
     ///
-    /// **Outlives the turn that started it.** That is the whole point: the theorizer and
-    /// DataVoyager submit with `--no-wait` and hand back a task id, so the conversation is
+    /// **Outlives the turn that started it.** That is the whole point: the theorizer
+    /// submits with `--no-wait` and hands back a task id, so the conversation is
     /// free again immediately — but nothing was collecting the result. Polling is also
     /// what makes a finished run *durable*, since the route persists its output into the
     /// sandbox on a terminal state and nothing else does (docs §29).

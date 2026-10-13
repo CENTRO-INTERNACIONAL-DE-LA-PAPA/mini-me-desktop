@@ -130,24 +130,6 @@ export interface LibraryArtifact {
   queryHint: string;
 }
 
-export interface DataFinding {
-  title: string;
-  detail: string;
-  chartPath?: string;
-}
-
-export interface DataAnalysisArtifact {
-  question: string;
-  datasetPaths: string[];
-  summary: string;
-  findings: DataFinding[];
-  hypothesesTested: string[];
-  charts: string[];
-  status?: string;
-  taskId?: string;
-  contextId?: string;
-}
-
 export interface ProjectSuggestion {
   title: string;
   rationale: string;
@@ -286,24 +268,6 @@ export interface LibraryArtifactPayload {
   query_hint: string;
 }
 
-export interface DataFindingPayload {
-  title: string;
-  detail?: string;
-  chart_path?: string | null;
-}
-
-export interface DataAnalysisArtifactPayload {
-  question: string;
-  dataset_paths: string[];
-  summary: string;
-  findings: DataFindingPayload[];
-  hypotheses_tested: string[];
-  charts: string[];
-  status?: string;
-  task_id?: string | null;
-  context_id?: string | null;
-}
-
 export interface ProjectSuggestionPayload {
   title: string;
   rationale: string;
@@ -352,7 +316,6 @@ export interface ArtifactStatePayload {
   files?: FileArtifactPayload[];
   hypotheses?: HypothesisArtifactPayload[];
   libraries?: LibraryArtifactPayload[];
-  analyses?: DataAnalysisArtifactPayload[];
   project?: ProjectArtifactPayload;
   edges?: ProvenanceEdgePayload[];
 }

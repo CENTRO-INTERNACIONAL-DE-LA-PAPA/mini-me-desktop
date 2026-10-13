@@ -4574,7 +4574,7 @@ mod tests {
 
     #[test]
     fn a_stored_thread_still_carries_the_task_ids_of_running_work() {
-        // The observation this rests on: a theorizer or DataVoyager run lives on Asta's own
+        // The observation this rests on: a theorizer run lives on Asta's own
         // hosted service, keyed by a task id. Closing the window never stopped the work — it
         // stopped our watching of it, and the poll is also what persists the result. So the ids
         // have to survive a reopen, and they do: `GET /threads/{id}/state` returns `values`

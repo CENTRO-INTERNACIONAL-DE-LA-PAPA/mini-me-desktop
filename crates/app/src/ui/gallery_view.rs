@@ -921,7 +921,7 @@ impl Workbench {
 impl Workbench {
     /// Long jobs still running, and the ones that finished this session.
     ///
-    /// The theorizer and DataVoyager return a task id immediately and finish minutes
+    /// The theorizer returns a task id immediately and finishes minutes
     /// later, so without this the answer to "is it still going?" was nothing at all —
     /// and, worse, nobody was collecting the result (docs §29).
     /// An agent's own plan, as a checklist with the step it is on marked.
@@ -1317,7 +1317,7 @@ impl Workbench {
 }
 
 impl Workbench {
-    /// One long-running job: the theorizer, or a DataVoyager analysis.
+    /// One long-running job, such as a theorizer run.
     ///
     /// No `cx` and no controls — a job is something this client polls, not a gate it can answer.
     /// What the row owes a reader is whether it is still going and roughly how long that takes.

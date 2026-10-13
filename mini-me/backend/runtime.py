@@ -103,7 +103,7 @@ async def asta_token_scope(
 ) -> AsyncIterator[str | None]:
     """Bind ``_active_asta_token`` to the caller's token for the block's duration.
 
-    The theorizer/DataVoyager status polls run in plain HTTP routes, *outside*
+    The theorizer/AutoDiscovery status polls run in plain HTTP routes, *outside*
     ``agent()`` — the only place that used to set this ContextVar — so without
     this they authenticate the sandbox `asta` CLI with the stale process-wide
     ``ASTA_TOKEN`` env var instead of the user's freshly refreshed token, making a

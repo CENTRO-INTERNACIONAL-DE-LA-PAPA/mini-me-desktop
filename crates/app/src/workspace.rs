@@ -182,7 +182,7 @@ impl Subagent {
     ///
     /// **Read off the registry rather than from a list kept here.** Three of the shipped
     /// specialists say so in their own descriptions — *"Conducts research using Asta tools"*,
-    /// *"using the Asta Theorizer pipeline"*, *"Run the Asta DataVoyager pipeline"* — and that
+    /// *"using the Asta Theorizer pipeline"* — and that
     /// text arrives in `subagents.json`, written by the backend from the factory call that
     /// actually built the coordinator.
     ///

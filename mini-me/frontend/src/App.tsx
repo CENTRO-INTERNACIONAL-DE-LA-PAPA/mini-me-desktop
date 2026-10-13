@@ -968,7 +968,6 @@ export function App() {
         report={artifacts.report}
         hypothesis={artifacts.hypothesis}
         library={artifacts.library}
-        analysis={artifacts.analysis}
         project={project}
         edges={artifacts.edges}
         onEditProject={handleEditProject}

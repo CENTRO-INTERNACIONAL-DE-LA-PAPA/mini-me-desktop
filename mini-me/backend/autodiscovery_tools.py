@@ -396,8 +396,8 @@ def _loud_shell(argv: list[str]) -> str:
 #:
 #: `rich_outputs` is a list of Jupyter display bundles, each carrying the *same* figure under
 #: several MIME types — `image/png`, `image/jpeg`, `image/svg+xml` and a `text/plain` repr. We take
-#: the PNG, exactly as §242's DataVoyager decoder does, and write `figure-NN.png`. Runs entirely in
-#: the sandbox so 458KB of base64 per experiment never crosses back.
+#: the PNG, as §242's (since removed) DataVoyager decoder did, and write `figure-NN.png`. Runs
+#: entirely in the sandbox so 458KB of base64 per experiment never crosses back.
 #:
 #: Apostrophe-free on purpose: the whole script is `shlex.quote`d into a single-quoted shell string.
 _FIGURES_PY = """
@@ -983,8 +983,7 @@ async def persist_discovery_outputs(
     each, so a 15-experiment run would be 7MB of base64 on a code path that fires from a status
     poll. `fetch_experiment_figures` gets them one at a time, when something asks.
 
-    Best-effort, like its DataVoyager counterpart: a write failure is logged, never raised into a
-    poll response.
+    Best-effort: a write failure is logged, never raised into a poll response.
     """
     awrite = getattr(sandbox, "awrite", None)
     if awrite is None:

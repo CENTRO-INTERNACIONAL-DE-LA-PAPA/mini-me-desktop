@@ -1,6 +1,6 @@
-"""Shared plumbing for Asta's async CLI jobs (theorizer, DataVoyager, AutoDiscovery).
+"""Shared plumbing for Asta's async CLI jobs (theorizer, AutoDiscovery).
 
-Asta's theorizer, DataVoyager, and AutoDiscovery are all long-running, async jobs that
+Asta's theorizer and AutoDiscovery are both long-running, async jobs that
 this backend submits and polls rather than blocks a turn on. Each grew its own copy of
 the same handful of primitives — running a sandbox command and reading its output
 whichever shape the sandbox answers in, pulling a JSON record out of merged
@@ -11,7 +11,7 @@ fix to one of them — `§224`'s dict-shaped-response handling, independently re
 in a second module before it was fixed in a third — lands once instead of needing to be
 found again per file.
 
-`_extract_json` below is the union of what `datavoyager_tools.py` and
+`_extract_json` below is the union of what `datavoyager_tools.py` (since removed) and
 `autodiscovery_tools.py` each did, not a straight copy of either: `datavoyager_tools.py`
 split off a `[stderr]` suffix before parsing and `autodiscovery_tools.py` did not, and
 only `autodiscovery_tools.py` matched a JSON array as well as an object. A first pass at
@@ -40,7 +40,7 @@ import json
 import re
 from typing import Any
 
-#: An A2A task id, as both the theorizer and DataVoyager mint them.
+#: An A2A task id, as the theorizer mints them.
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -66,7 +66,7 @@ def _extract_json(output: str) -> Any:
     Tries the text before a `[stderr]` marker first — `aexecute` appends stderr there, and a
     record that parses cleanly on its own must not be lost to unrelated warning noise after it
     — then the full output, each as a whole-string parse before falling back to bracket-matching
-    `{...}` or `[...]` (DataVoyager's and AutoDiscovery's reduced records can be a JSON array,
+    `{...}` or `[...]` (AutoDiscovery's reduced records can be a JSON array,
     not just an object).
     """
     text = (output or "").strip()
@@ -101,7 +101,7 @@ def is_valid_task_id(task_id: str) -> bool:
     return bool(task_id) and bool(_UUID_RE.fullmatch(task_id))
 
 
-#: The status vocabulary every Asta-job adapter (theorizer, DataVoyager, AutoDiscovery)
+#: The status vocabulary every Asta-job adapter (theorizer, AutoDiscovery)
 #: already normalizes its own service's native words into — the shared `JobState`
 #: `docs/refactoring-ideas.md` item 0 asks for, sitting *above* each adapter rather than
 #: replacing any of them. Each adapter still speaks its own service's raw vocabulary
@@ -126,8 +126,8 @@ def fold_a2a_terminal_state(state: str | None) -> str | None:
     unrecognised word — so the caller keeps treating those as still going, matching
     `autodiscovery_tools.py::normalise_status`'s own "an unknown word is not terminal" rule.
 
-    theorizer and DataVoyager arrived at exactly this fold independently and identically;
-    this is that one piece, shared. The raw `state` stays available to the caller for
+    theorizer and the since-removed DataVoyager arrived at exactly this fold independently and
+    identically; this is that one piece, shared. The raw `state` stays available to the caller for
     messages like "Asta ended the run as {state} without reporting a reason" — folding it
     away here would blur "rejected" and "failed" in text a researcher or a log reads.
     """

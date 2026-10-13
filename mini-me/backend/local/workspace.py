@@ -495,7 +495,7 @@ def _command_env() -> dict[str, str]:
        directory is what we prepend — which also retires the sandbox snapshot's
        duplicate dependency manifest.
     2. **``ASTA_TOKEN`` must be present**, or the ``asta`` CLI (theory generation,
-       DataVoyager, PDF extraction) cannot authenticate. Read at call time, not import
+       AutoDiscovery, PDF extraction) cannot authenticate. Read at call time, not import
        time: ``.env`` is loaded after this module is imported.
     """
     env = dict(os.environ)

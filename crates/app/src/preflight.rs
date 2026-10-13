@@ -852,7 +852,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     //
     // **Required.** It used to be a warning, on the grounds that the coordinator can answer
     // without `asta`. In practice nearly every specialist leans on it — literature search, the
-    // theorizer, DataVoyager, AutoDiscovery — so a "working" app without it could do almost
+    // theorizer, AutoDiscovery — so a "working" app without it could do almost
     // nothing a researcher came for. Missing or signed out is now a `Fail`, which keeps the
     // guided Setup open until it is fixed. A signed-in account that merely lacks the theorizer
     // permission stays a warning: literature search works for it.

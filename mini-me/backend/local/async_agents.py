@@ -1,7 +1,7 @@
 """Async subagents: launch work in the background and keep the conversation live.
 
 **What this gives the researcher.** Today every subagent except the theorizer and
-DataVoyager blocks the chat — an EDA or a report can freeze the conversation for minutes.
+AutoDiscovery blocks the chat — an EDA or a report can freeze the conversation for minutes.
 With this, the coordinator can hand a whole piece of work to a *background Mini-Me*, say
 so, and hand control straight back. You keep asking questions while it runs.
 

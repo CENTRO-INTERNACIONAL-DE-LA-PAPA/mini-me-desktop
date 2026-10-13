@@ -2,7 +2,6 @@ import type { BaseMessage } from "@langchain/core/messages";
 import { Info } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type {
-  DataAnalysisArtifact,
   DatasetArtifact,
   FileArtifact,
   HypothesisArtifact,
@@ -46,7 +45,6 @@ interface AppShellProps {
   report?: ReportArtifact | null;
   hypothesis?: HypothesisArtifact | null;
   library?: LibraryArtifact | null;
-  analysis?: DataAnalysisArtifact | null;
   project?: ProjectArtifact | null;
   edges?: ProvenanceEdge[];
   onEditProject?: (edit: ProjectEdit) => void;
@@ -94,7 +92,6 @@ export function AppShell({
   report,
   hypothesis,
   library,
-  analysis,
   project,
   edges,
   onEditProject,
@@ -424,7 +421,6 @@ export function AppShell({
           report={report}
           hypothesis={hypothesis}
           library={library}
-          analysis={analysis}
           project={project}
           edges={edges}
           onEditProject={onEditProject}

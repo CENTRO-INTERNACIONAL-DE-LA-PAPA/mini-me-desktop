@@ -2,7 +2,7 @@ import { getAuthToken } from "./fileClient";
 import { LANGGRAPH_API_URL } from "./streamConfig";
 
 // Per-user Asta access-token management (self-service token refresh). The token
-// authenticates the `asta` CLI in the sandbox (theorizer, DataVoyager, PDF
+// authenticates the `asta` CLI in the sandbox (theorizer, PDF
 // extraction) and expires ~weekly. In "vault" mode it is stored server-side via
 // /config/asta; in "client" mode it stays in the browser and rides on every run
 // as `__asta_token` (see buildSubmitConfigurable). We never round-trip the token

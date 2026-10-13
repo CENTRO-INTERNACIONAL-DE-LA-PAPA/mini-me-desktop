@@ -1,6 +1,6 @@
 """Guards for the Asta AutoDiscovery tool (`backend.autodiscovery_tools`).
 
-Two jobs. The first is the one the DataVoyager and theorizer tests already do: pin
+Two jobs. The first is the one the theorizer tests already do: pin
 the real CLI contract so a flag drifting is caught here rather than in a live run.
 The second is specific to this module — **prove that no model decision can spend a
 credit.** 1 credit = 1 experiment out of a fixed grant, the CLI's own confirmation

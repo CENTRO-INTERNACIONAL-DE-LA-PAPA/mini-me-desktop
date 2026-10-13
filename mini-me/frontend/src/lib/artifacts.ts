@@ -1,6 +1,5 @@
 import type {
   ArtifactStatePayload,
-  DataAnalysisArtifact,
   DatasetArtifact,
   FileArtifact,
   HypothesisArtifact,
@@ -57,7 +56,6 @@ export interface NormalizedArtifacts {
   report: ReportArtifact | null;
   hypothesis: HypothesisArtifact | null;
   library: LibraryArtifact | null;
-  analysis: DataAnalysisArtifact | null;
   project: ProjectArtifact | null;
   edges: ProvenanceEdge[];
 }
@@ -72,7 +70,6 @@ const NODE_ID_FIELDS: Record<string, string[]> = {
   file: ["path"],
   hypothesis: ["question"],
   library: ["indexPath"],
-  analysis: ["question"],
 };
 
 export function nodeId(kind: string, artifact: Record<string, unknown>): string {
@@ -182,26 +179,6 @@ export function normalizeArtifacts(
               pageCount: paper.page_count ?? undefined,
             })),
             queryHint: raw.query_hint ?? "",
-          };
-        })()
-      : null,
-    analysis: artifacts?.analyses?.length
-      ? (() => {
-          const raw = artifacts.analyses![artifacts.analyses!.length - 1];
-          return {
-            question: raw.question,
-            datasetPaths: raw.dataset_paths ?? [],
-            summary: raw.summary ?? "",
-            findings: (raw.findings ?? []).map((finding) => ({
-              title: finding.title,
-              detail: finding.detail ?? "",
-              chartPath: finding.chart_path ?? undefined,
-            })),
-            hypothesesTested: raw.hypotheses_tested ?? [],
-            charts: raw.charts ?? [],
-            status: raw.status ?? "completed",
-            taskId: raw.task_id ?? undefined,
-            contextId: raw.context_id ?? undefined,
           };
         })()
       : null,

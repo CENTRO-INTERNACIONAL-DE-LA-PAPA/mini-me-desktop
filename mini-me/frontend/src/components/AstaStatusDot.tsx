@@ -26,7 +26,7 @@ function health(status: AstaStatus): Health {
  * reflects whether the `asta` CLI in the sandbox can authenticate. Clicking it
  * opens Settings (where the AstaConnectionCard lets the user paste a fresh
  * token). This surfaces the "you need to log in to Asta" state the user
- * otherwise only discovered when the theorizer/DataVoyager silently stalled.
+ * otherwise only discovered when the theorizer silently stalled.
  *
  * `refreshSignal` is bumped by the parent (e.g. when the Settings panel closes)
  * so the dot re-reads status right after the user updates their token.
