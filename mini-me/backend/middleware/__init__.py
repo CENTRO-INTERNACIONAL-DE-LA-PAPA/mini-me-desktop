@@ -6,6 +6,7 @@ them from ``backend.middleware`` without knowing which submodule each lives in.
 
 from backend.middleware.artifacts import ArtifactCaptureMiddleware
 from backend.middleware.claims import ClaimsRecorder
+from backend.middleware.command_budget import CommandBudget
 from backend.middleware.dataverse_first import (
     SearchBeforeRecommending,
     SearchResultsFile,
@@ -14,7 +15,6 @@ from backend.middleware.library_first import RunBeforeReporting
 from backend.middleware.no_spending import NoSpendingWithoutApproval
 from backend.middleware.submit_first import (
     DraftBeforeReporting,
-    SubmitBeforeReporting,
     TheorizeBeforeReporting,
 )
 from backend.middleware.guardrails import (
@@ -25,6 +25,7 @@ from backend.middleware.guardrails import (
 from backend.middleware.project import ProjectSpineMiddleware
 from backend.middleware.search_first import KeepSources, SearchBeforeCiting
 from backend.middleware.tool_gate import Step, ToolsBeforeAnswering
+from backend.middleware.validate_first import ValidateBeforeAnswering
 from backend.middleware.sync import (
     FileSyncMiddleware,
     SandboxSyncMiddleware,
@@ -34,13 +35,13 @@ from backend.middleware.sync import (
 __all__ = [
     "ArtifactCaptureMiddleware",
     "ClaimsRecorder",
+    "CommandBudget",
     "FileSyncMiddleware",
     "KeepSources",
     "ProjectSpineMiddleware",
     "RunBeforeReporting",
     "DraftBeforeReporting",
     "NoSpendingWithoutApproval",
-    "SubmitBeforeReporting",
     "TheorizeBeforeReporting",
     "SearchBeforeCiting",
     "SearchBeforeRecommending",
@@ -48,6 +49,7 @@ __all__ = [
     "SandboxSyncMiddleware",
     "Step",
     "ToolsBeforeAnswering",
+    "ValidateBeforeAnswering",
     "_collect_sandbox_files",
     "_build_filesystem_permissions",
     "_build_pii_middleware",

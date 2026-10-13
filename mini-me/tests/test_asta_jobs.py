@@ -1,6 +1,6 @@
 """Guards for the shared Asta job plumbing (`backend.asta_jobs`).
 
-`theory_tools.py`, `datavoyager_tools.py`, and `autodiscovery_tools.py` each import from
+`theory_tools.py` and `autodiscovery_tools.py` each import from
 here rather than keeping their own copies of these primitives — see the module docstring
 for which pieces turned out to be genuinely shared and which stayed put. These tests exist
 so a change here is checked once, directly, rather than only indirectly through whichever

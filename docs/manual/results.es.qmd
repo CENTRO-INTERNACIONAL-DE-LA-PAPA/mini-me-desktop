@@ -84,11 +84,10 @@ Para buscar dentro de tus PDF, simplemente pregunta; por ejemplo, *"¿Cuáles de
 de daños por heladas?"*. Mini-Me busca **por significado**, así que encuentra pasajes
 relevantes aunque no usen tus palabras exactas.
 
-## Hipótesis, análisis y descubrimientos
+## Hipótesis y descubrimientos
 
-Cuando el **Hypothesis Generator**, **Data Voyager** o **AutoDiscovery** han trabajado en esta
-conversación, sus resultados aparecen en las secciones **Hypotheses**, **Analyses** y
-**Discoveries** del Pinboard. **Discoveries** también muestra una ejecución de AutoDiscovery que
+Cuando el **Hypothesis Generator** o **AutoDiscovery** han trabajado en esta conversación, sus
+resultados aparecen en las secciones **Hypotheses** y **Discoveries** del Pinboard. **Discoveries** también muestra una ejecución de AutoDiscovery que
 no se pudo preparar, para que sepas que falló.
 
 ## Informes
@@ -96,8 +95,10 @@ no se pudo preparar, para que sepas que falló.
 Pide *"Escribe un informe de lo que encontramos"* y el **Report Writer** crea un informe
 completo con métodos, hallazgos, limitaciones y referencias. Aparece en **Files**.
 
-**Para guardar el informe como PDF:** presiona **`Ctrl+P`** y elige **Save the latest report
-as a PDF**. El PDF se guarda en la carpeta de la conversación.
+**El PDF se guarda solo:** cada informe también se guarda como PDF en la carpeta `reports` de
+la conversación, con el título del informe como nombre, y aparece en **Files** con lo demás.
+Para guardar una copia nueva cuando quieras, presiona **`Ctrl+P`** y elige **Save the latest
+report as a PDF**.
 
 ![Un informe guardado como PDF](images/results-report-pdf.png)
 

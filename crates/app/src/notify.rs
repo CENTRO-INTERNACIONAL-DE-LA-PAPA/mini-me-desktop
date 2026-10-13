@@ -13,8 +13,8 @@
 //! this is written on**, and a fresh build failure mode on a colleague's laptop.
 //!
 //! So this spawns PowerShell, which the app already does for WSL and git, and which cannot fail at
-//! build time at all. It follows the pattern `theory_tools`, `datavoyager_tools` and
-//! `autodiscovery_tools` all use: **a pure command builder, unit-tested, so the contract is checked
+//! build time at all. It follows the pattern `theory_tools` and
+//! `autodiscovery_tools` both use: **a pure command builder, unit-tested, so the contract is checked
 //! here rather than in a live run.** What remains untestable is one `Command::spawn`, which is as
 //! small as this could be made.
 //!

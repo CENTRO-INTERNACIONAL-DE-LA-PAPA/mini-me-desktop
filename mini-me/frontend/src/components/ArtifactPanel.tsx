@@ -1,7 +1,6 @@
-import { Archive, BookMarked, ChevronDown, ChevronRight, Database, FileCode2, FileText, FlaskConical, Image as ImageIcon, Lightbulb, LibraryBig, Loader2, Share2 } from "lucide-react";
+import { Archive, BookMarked, ChevronDown, ChevronRight, Database, FileCode2, FileText, Image as ImageIcon, Lightbulb, LibraryBig, Loader2, Share2 } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
 import type {
-  DataAnalysisArtifact,
   DatasetArtifact,
   FileArtifact,
   HypothesisArtifact,
@@ -11,7 +10,6 @@ import type {
   ReportArtifact,
   SourceArtifact,
 } from "../types";
-import { AnalysisFindingCard } from "./AnalysisCard";
 import { CapAndExpand } from "./CapAndExpand";
 import { DatasetCard } from "./DatasetCard";
 import { FileCard } from "./FileCard";
@@ -24,7 +22,6 @@ import { SourceCard } from "./SourceCard";
 import { TheoryCard } from "./TheoryCard";
 import { nodeId, paperNodeId } from "../lib/artifacts";
 import { useTheorizerStatus } from "../lib/theorizerClient";
-import { useDataVoyagerStatus } from "../lib/dataVoyagerClient";
 import type { ProjectControls, ProjectEdit } from "../lib/projectClient";
 
 // Deterministic edges are self-describing: an endpoint may be a paper/subagent
@@ -48,7 +45,6 @@ interface ArtifactPanelProps {
   report?: ReportArtifact | null;
   hypothesis?: HypothesisArtifact | null;
   library?: LibraryArtifact | null;
-  analysis?: DataAnalysisArtifact | null;
   project?: ProjectArtifact | null;
   edges?: ProvenanceEdge[];
   onRenderReport?: (report: ReportArtifact) => Promise<void>;
@@ -63,7 +59,7 @@ interface ArtifactPanelProps {
 const SECTION_CAP = 5;
 const IMAGE_CAP = 9;
 
-type TabKey = "graph" | "datasets" | "sources" | "theories" | "library" | "analysis" | "images" | "files" | "report";
+type TabKey = "graph" | "datasets" | "sources" | "theories" | "library" | "images" | "files" | "report";
 
 // Map a provenance-graph node's artifact kind to the tab that shows it, so
 // clicking a node jumps to its artifact.
@@ -72,7 +68,6 @@ const KIND_TO_TAB: Record<string, TabKey> = {
   source: "sources",
   hypothesis: "theories",
   library: "library",
-  analysis: "analysis",
   file: "files",
   report: "report",
 };
@@ -119,7 +114,6 @@ export const ArtifactPanel = memo(function ArtifactPanel({
   report,
   hypothesis,
   library,
-  analysis,
   project,
   edges = [],
   onRenderReport,
@@ -141,12 +135,6 @@ export const ArtifactPanel = memo(function ArtifactPanel({
   const theoriesRunning = liveHypothesis?.status === "running";
   const theories = liveHypothesis?.theories ?? [];
   const libraryPapers = library?.papers ?? [];
-  // Same live-poll pattern for DataVoyager: while a run is generating, poll the
-  // analyze-data status route so the Analysis card fills in on its own.
-  const { display: liveAnalysis } = useDataVoyagerStatus(threadId, analysis ?? null);
-  const analysisRunning = liveAnalysis?.status === "running";
-  const analysisFailed = liveAnalysis?.status === "failed";
-  const analysisFindings = liveAnalysis?.findings ?? [];
 
   // Validate the provenance graph: keep deterministic (self-describing) edges as
   // is; keep declared edges only when their target resolves to a real artifact
@@ -174,13 +162,11 @@ export const ArtifactPanel = memo(function ArtifactPanel({
       real.add(nodeId("library", { indexPath: library.indexPath }));
       library.papers.forEach((p) => real.add(paperNodeId({ doi: p.doi, title: p.title })));
     }
-    const ana = liveAnalysis ?? analysis ?? null;
-    if (ana) real.add(nodeId("analysis", { question: ana.question }));
 
     return edges.filter(
       (e) => DETERMINISTIC_RELATIONS.has(e.relation) || real.has(e.target),
     );
-  }, [edges, datasets, sources, files, report, hypothesis, liveHypothesis, library, analysis, liveAnalysis]);
+  }, [edges, datasets, sources, files, report, hypothesis, liveHypothesis, library]);
 
   const tabs = (
     [
@@ -189,20 +175,16 @@ export const ArtifactPanel = memo(function ArtifactPanel({
       { key: "sources", label: "Sources", count: sources.length },
       { key: "theories", label: "Theories", count: theories.length },
       { key: "library", label: "Library", count: library ? library.paperCount || libraryPapers.length : 0 },
-      { key: "analysis", label: "Analysis", count: analysisFindings.length },
       { key: "images", label: "Images", count: images.length },
       { key: "files", label: "Files", count: otherFiles.length },
       { key: "report", label: "Report", count: report ? 1 : 0 },
     ] satisfies { key: TabKey; label: string; count: number }[]
-    // Keep the Theories / Analysis tabs visible whenever their run produced an
-    // artifact — even with zero findings — so the question, status, and any
-    // narrative are still surfaced instead of silently disappearing (which reads
-    // as "the run produced nothing").
+    // Keep the Theories tab visible whenever its run produced an artifact —
+    // even with zero theories — so the question, status, and any knowledge gaps
+    // are still surfaced instead of silently disappearing (which reads as "the
+    // run produced nothing").
   ).filter(
-    (tab) =>
-      tab.count > 0 ||
-      (tab.key === "theories" && !!liveHypothesis) ||
-      (tab.key === "analysis" && !!liveAnalysis),
+    (tab) => tab.count > 0 || (tab.key === "theories" && !!liveHypothesis),
   );
 
   // Jump from a clicked graph node to the tab that shows its artifact.
@@ -400,79 +382,6 @@ export const ArtifactPanel = memo(function ArtifactPanel({
                 <p className="library-hint">
                   {library.queryHint || "Upload PDFs and ask me to index them."}
                 </p>
-              )}
-            </section>
-          ) : null}
-
-          {activeTab === "analysis" && liveAnalysis ? (
-            <section className="artifact-section">
-              <div className="section-title">
-                <FlaskConical size={16} aria-hidden="true" />
-                <h3>Analysis</h3>
-                {analysisRunning ? (
-                  <span className="ct theory-running">
-                    <Loader2 size={12} aria-hidden="true" className="spin" />
-                    running
-                  </span>
-                ) : (
-                  <span className="ct">DataVoyager</span>
-                )}
-              </div>
-              {liveAnalysis.question ? (
-                <p className="theory-question">{liveAnalysis.question}</p>
-              ) : null}
-              {analysisRunning ? (
-                <div className="theory-progress">
-                  <Loader2 size={16} aria-hidden="true" className="spin" />
-                  <p>
-                    DataVoyager is analyzing your data — writing and running code to
-                    test hypotheses against it. This usually takes a few minutes to
-                    tens of minutes; the results will appear here automatically.
-                  </p>
-                </div>
-              ) : (
-                <>
-                  {liveAnalysis.summary ? (
-                    <p className="analysis-summary">{liveAnalysis.summary}</p>
-                  ) : null}
-                  {analysisFailed && !liveAnalysis.summary ? (
-                    <p className="library-hint">
-                      The DataVoyager run did not complete. Try again, or refine the
-                      question.
-                    </p>
-                  ) : null}
-                  {liveAnalysis.hypothesesTested.length > 0 ? (
-                    <div className="analysis-hypotheses">
-                      <p className="analysis-subhead">Hypotheses tested</p>
-                      <ul>
-                        {liveAnalysis.hypothesesTested.map((hyp, hypIndex) => (
-                          <li key={hypIndex}>{hyp}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
-                  {analysisFindings.length > 0 ? (
-                    <CapAndExpand
-                      items={analysisFindings}
-                      cap={SECTION_CAP}
-                      noun="findings"
-                      keyOf={(finding) => finding.title}
-                      renderItem={(finding) => <AnalysisFindingCard finding={finding} />}
-                    />
-                  ) : !analysisFailed && liveAnalysis.summary ? (
-                    <p className="library-hint">
-                      Charts and the notebook are in the Images and Files tabs. Ask
-                      me to summarize the findings for a structured breakdown.
-                    </p>
-                  ) : null}
-                  {liveAnalysis.charts.length > 0 ? (
-                    <p className="analysis-charts-note">
-                      {liveAnalysis.charts.length} chart
-                      {liveAnalysis.charts.length === 1 ? "" : "s"} produced — see the
-                      Images tab.
-                    </p>
-                  ) : null}
-                </>
               )}
             </section>
           ) : null}

@@ -76,7 +76,7 @@ def test_plan_from_output_drops_empty_and_returns_none_when_all_empty() -> None:
 def test_plan_from_output_reads_pydantic_like_steps() -> None:
     class _Step:
         def __init__(self, title: str) -> None:
-            self.title, self.rationale, self.action, self.prompt = title, "r", "DataVoyager", "p"
+            self.title, self.rationale, self.action, self.prompt = title, "r", "AutoDiscovery", "p"
 
     class _Plan:
         goal = "g"
@@ -84,7 +84,7 @@ def test_plan_from_output_reads_pydantic_like_steps() -> None:
 
     plan = plan_from_output(_Plan())
     assert plan is not None and [s["title"] for s in plan["steps"]] == ["x", "y"]
-    assert plan["steps"][0]["action"] == "DataVoyager"
+    assert plan["steps"][0]["action"] == "AutoDiscovery"
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +271,7 @@ def test_planner_capture_emits_plan_carrier_with_nonce() -> None:
         goal="understand X",
         steps=[
             SimpleNamespace(title="a", rationale="r", action="Academic Research", prompt="p1"),
-            SimpleNamespace(title="b", rationale="r", action="DataVoyager", prompt="p2"),
+            SimpleNamespace(title="b", rationale="r", action="AutoDiscovery", prompt="p2"),
         ],
     )
     mw = ArtifactCaptureMiddleware(source="research_planner")

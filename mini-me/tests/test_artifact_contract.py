@@ -65,7 +65,6 @@ BUCKETS: dict[str, type] = {
     "files": schemas.FileArtifactPayload,
     "hypotheses": schemas.HypothesisArtifactPayload,
     "libraries": schemas.LibraryArtifactPayload,
-    "analyses": schemas.DataAnalysisArtifactPayload,
     "discoveries": schemas.DiscoveryRunArtifactPayload,
 }
 

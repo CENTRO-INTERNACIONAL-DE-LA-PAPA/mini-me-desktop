@@ -1193,17 +1193,15 @@ enum Field {
     BaseUrl,
     ApiKey,
     AstaToken,
-    AstaApiKey,
     Port,
 }
 
 impl Field {
-    const ALL: [Field; 6] = [
+    const ALL: [Field; 5] = [
         Field::ModelId,
         Field::BaseUrl,
         Field::ApiKey,
         Field::AstaToken,
-        Field::AstaApiKey,
         Field::Port,
     ];
 
@@ -1213,7 +1211,6 @@ impl Field {
             Field::BaseUrl => "Base URL",
             Field::ApiKey => "API key",
             Field::AstaToken => "Asta token",
-            Field::AstaApiKey => "Asta API key",
             Field::Port => "Backend port",
         }
     }
@@ -1222,7 +1219,7 @@ impl Field {
     fn section(self) -> Section {
         match self {
             Field::ModelId | Field::BaseUrl | Field::ApiKey => Section::Model,
-            Field::AstaToken | Field::AstaApiKey => Section::Research,
+            Field::AstaToken => Section::Research,
             Field::Port => Section::Backend,
         }
     }
@@ -1233,13 +1230,12 @@ impl Field {
             Field::BaseUrl => "https://… (custom providers only)",
             Field::ApiKey => "Paste to set — stored in the OS keychain",
             Field::AstaToken => "Paste to set",
-            Field::AstaApiKey => "Paste to set",
             Field::Port => "2024",
         }
     }
 
     fn is_secret(self) -> bool {
-        matches!(self, Field::ApiKey | Field::AstaToken | Field::AstaApiKey)
+        matches!(self, Field::ApiKey | Field::AstaToken)
     }
 
     /// The keychain entry a secret field writes to. `None` for the provider key, whose
@@ -1247,7 +1243,6 @@ impl Field {
     fn secret_name(self) -> Option<&'static str> {
         match self {
             Field::AstaToken => Some("ASTA_TOKEN"),
-            Field::AstaApiKey => Some("ASTA_API_KEY"),
             _ => None,
         }
     }
@@ -1650,10 +1645,10 @@ fn sync_library_bucket(buckets: &mut Vec<protocol::Bucket>, documents: &[protoco
             bucket.items = titles;
         }
     } else if !titles.is_empty() {
-        // Keep the protocol's usual display order: libraries precede analyses/recommendations.
+        // Keep the protocol's usual display order: libraries precede discoveries/recommendations.
         let position = buckets
             .iter()
-            .position(|bucket| matches!(bucket.name, "analyses" | "recommendations"))
+            .position(|bucket| matches!(bucket.name, "discoveries" | "recommendations"))
             .unwrap_or(buckets.len());
         buckets.insert(
             position,
@@ -1826,29 +1821,108 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
 ///
 /// Attach-only is deliberately *not* in the list: that mode is opt-in and its message
 /// already names its own fix, so a setup pane would be answering a question nobody asked.
+/// The Asta row after its action finished cleanly, read from that run's own output: who signed
+/// in, and whether the account may generate theories (`preflight::ASTA_THEORY_MARKER`).
+///
+/// Lacking the theorizer permission is a warning, as it is when Setup checks: literature
+/// search works without it.
+fn asta_sign_in_result(output: &str) -> (preflight::State, String) {
+    let who = match preflight::asta_account(output) {
+        Some(email) => format!("Signed in as {email}"),
+        None => "Signed in".to_string(),
+    };
+    if output.contains(&format!("{}no", preflight::ASTA_THEORY_MARKER)) {
+        (
+            preflight::State::Warn,
+            format!("{who}, but this account can't generate research theories"),
+        )
+    } else {
+        (preflight::State::Pass, who)
+    }
+}
+
+/// What Settings says about a model's tool support: a colour and at most three sentences.
+fn tool_support_message(support: &catalogue::ToolSupport) -> (u32, String) {
+    match support {
+        catalogue::ToolSupport::Full => {
+            (theme::text_muted(), "✓ Works with every specialist.".to_string())
+        }
+        catalogue::ToolSupport::Partial => (
+            theme::warning(),
+            format!(
+                "⚠ This model can use tools but refuses to be required to call one, so Academic                  Research, PDF Librarian, Hypothesis Generator and other specialists that must                  search or run a step first may fail. Models that work fully: {}.",
+                catalogue::KNOWN_GOOD.join(", ")
+            ),
+        ),
+        catalogue::ToolSupport::None => (
+            theme::error(),
+            "✗ This model can't use tools, so Mini-Me can't work with it. Choose another model."
+                .to_string(),
+        ),
+        catalogue::ToolSupport::Unknown(reason) => {
+            (theme::text_muted(), format!("Couldn't check this model: {reason}."))
+        }
+    }
+}
+
+/// One or two plain sentences for a failed Setup fix, shown in place of its log.
+///
+/// Matched on the few failures that have a cause a researcher can act on; anything else gets
+/// a generic sentence, with the full output one click away under "Show details".
+fn failure_summary(check_id: &str, lines: &[String], stopped: bool, timed_out: bool) -> String {
+    if timed_out {
+        return "Sign-in wasn't completed in 10 minutes. Press Retry to try again.".into();
+    }
+    if stopped {
+        return "Stopped before it finished.".into();
+    }
+    let output = lines.join("\n").to_lowercase();
+    let mentions = |markers: &[&str]| markers.iter().any(|marker| output.contains(marker));
+    if mentions(&["canceled by the user", "cancelled by the user", "operation was canceled"])
+        // The elevated WSL install prints nothing here — it runs in a window of its own — and
+        // fails only when the administrator prompt is refused (`preflight::elevated`).
+        || (check_id == "runtime" && lines.is_empty())
+    {
+        "Administrator approval was declined. Press Retry and choose Yes when Windows asks."
+            .into()
+    } else if mentions(&[
+        "could not resolve",
+        "temporary failure in name resolution",
+        "failed to download",
+        "failed to fetch",
+        "connection refused",
+        "network is unreachable",
+        "timed out",
+    ]) {
+        "The download failed. Check your internet connection and try again.".into()
+    } else {
+        "The installer stopped with an error.".into()
+    }
+}
+
 /// Whether a failed turn failed because the chosen model cannot call tools.
 ///
 /// Mini-Me cannot work without tools: the coordinator reaches every specialist through one, and
-/// they search, read files and run code through theirs. Providers word the refusal differently —
-/// OpenRouter answers 404 *"No endpoints found that support tool use"*, Ollama-style servers
-/// *"… does not support tools"*, others name function calling — so the check is a short list of
-/// phrasings, compared case-insensitively.
+/// they search, read files and run code through theirs. The phrasings are matched in
+/// [`catalogue::model_cannot_use_tools`], which the Settings check shares.
 fn model_cannot_use_tools(message: &str) -> bool {
-    const MARKERS: [&str; 7] = [
-        "support tool use",
-        "does not support tools",
-        "do not support tools",
-        "tools are not supported",
-        "tool use is not supported",
-        "does not support function calling",
-        "function calling is not supported",
-    ];
-    let message = message.to_lowercase();
-    MARKERS.iter().any(|marker| message.contains(marker))
+    catalogue::model_cannot_use_tools(message)
+}
+
+/// Whether a failed turn failed because the model refused to be *required* to call a tool.
+///
+/// Such a model calls tools when it chooses to, so the coordinator works; it fails at the first
+/// specialist that must search or run a step before answering, or that returns a structured
+/// answer. Before this was recognised it surfaced as "Internal error".
+fn model_refuses_forced_tools(message: &str) -> bool {
+    catalogue::model_refuses_forced_tools(message)
 }
 
 /// What the researcher reads in the conversation when [`model_cannot_use_tools`] matched.
 const NO_TOOLS_REPLY: &str = "This model can't use tools, and Mini-Me needs them to search, read files, run code and call its specialists. Choose a different model in **Settings → Model** (Ctrl+,) and ask again. If you set a model for a specific specialist, check that one too.";
+
+/// What the researcher reads in the conversation when [`model_refuses_forced_tools`] matched.
+const FORCED_TOOLS_REPLY: &str = "This model can use tools but refuses to be required to call one, which some specialists need (for example Academic Research, PDF Librarian and Hypothesis Generator). Choose another model in **Settings → Model** (Ctrl+,), for example Claude Sonnet 4.5 or GPT-5.4 mini, and ask again. Settings → Model also checks each model you pick.";
 
 fn looks_like_a_setup_failure(message: &str) -> bool {
     const MARKERS: [&str; 5] = [
@@ -2191,10 +2265,22 @@ struct RunningFix {
     /// lines is why a fix that printed nothing showed a box containing one dash instead of
     /// admitting there was nothing to show (docs §60).
     notes: Vec<String>,
-    /// Which check this fix belongs to, so a re-check can tell whether it worked.
+    /// Which check this fix belongs to: the row that shows its progress and its result.
     check_id: &'static str,
+    /// What ran, so Retry can run exactly the same thing again.
+    argv: Vec<String>,
     done: bool,
     ok: bool,
+    /// Whether a failed fix's output is expanded. A successful one never shows it: finishing
+    /// cleanly is the whole verdict, and its log only buries the ✓.
+    show_details: bool,
+    /// Whether this fix signs in, and so prints a device-activation link worth catching.
+    scan_sign_in: bool,
+    /// Whether that link has been opened in the browser already. Once is help; every line
+    /// after it would be a new tab.
+    browser_opened: bool,
+    /// Stopped because the sign-in was not approved within [`ASTA_SIGN_IN_TIMEOUT`].
+    timed_out: bool,
     /// The way to stop it, for as long as there is a process to stop (docs §172).
     cancel: preflight::Cancel,
     /// Set once Stop has been pressed, so the pane can say *stopping* rather than claiming a
@@ -2206,12 +2292,10 @@ struct RunningFix {
 /// How much of a fix's output the pane keeps.
 const FIX_LOG_LINES: usize = 200;
 
-/// One collapsed line for a finished onboarding step, once it is no longer the active row.
-struct OnboardingStepResult {
-    check_id: &'static str,
-    label: String,
-    ok: bool,
-}
+/// How long an Asta sign-in may wait for the researcher's approval in the browser. The CLI
+/// polls without a limit of its own, so without this a closed browser tab left Setup
+/// "installing" forever.
+const ASTA_SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// One editable primitive from an MCP elicitation form.
 struct McpElicitationField {
@@ -2262,7 +2346,7 @@ struct Workbench {
     dismissed_suggestions: std::collections::HashSet<String>,
     /// Research outputs, from the latest `values` snapshot of the current run.
     buckets: Vec<Bucket>,
-    /// Long jobs (theorizer, DataVoyager) started by a turn and still being watched.
+    /// Long jobs (the theorizer) started by a turn and still being watched.
     /// Kept for the whole session so a finished one stays visible rather than vanishing.
     jobs: Vec<protocol::Job>,
     /// Work handed to a background Mini-Me, and whether it is stopped at the gate.
@@ -2363,33 +2447,31 @@ struct Workbench {
     settings_section: Section,
     report: Option<preflight::Report>,
     checking: bool,
-    /// Set when a fix has just succeeded, so the re-check it triggered is compared against
-    /// the row it was meant to fix. See [`Workbench::judge_finished_fix`].
-    judge_after_recheck: bool,
+    /// A check asked for while one was already in flight. Run once the current one lands,
+    /// rather than dropped: a dropped request left a fix judged against a report started
+    /// before it finished.
+    recheck_pending: bool,
+    /// Rows a fix finished successfully in this Setup session, with the state it left them in.
+    /// A fix exiting cleanly is the proof it worked, so a later report from the dependents'
+    /// check does not overrule it. Cleared when Setup is opened again, which checks for real.
+    locally_done: HashMap<&'static str, (preflight::State, String)>,
+    /// The WSL install finished and only a Windows restart remains. Holds Setup's Get started
+    /// shut, because nothing that depends on the distro can work before the restart.
+    restart_required: bool,
     /// A fix the app is running for the user: what it is, and what it has printed so far.
-    /// `Some` means a command is live, which is what disables the other buttons.
+    /// While it is not `done`, every button that could move on is disabled (`setup_busy`).
     running_fix: Option<RunningFix>,
-    /// Onboarding modal: open flag, and whether the one-button sequence is currently
-    /// walking the check list on its own (as opposed to a person clicking one fix by hand).
+    /// The timer that ends an Asta sign-in nobody approved. Dropping it cancels it.
+    asta_sign_in_deadline: Option<gpui::Task<()>>,
     onboarding_open: bool,
-    onboarding_auto_running: bool,
-    /// The `check.id` the auto-run is currently driving, so the body knows which row's
-    /// `running_fix` belongs to it.
-    onboarding_step: Option<&'static str>,
-    /// Set when the auto-run reaches a check that needs the user to act outside the app
-    /// (a `Fix::Manual` or a sign-in link) — paused, not failed.
-    onboarding_awaiting_manual: Option<&'static str>,
-    /// One-line verdicts for steps that already ran and are no longer the active row, so
-    /// their box can collapse instead of keeping every finished step's full log on screen.
-    onboarding_history: Vec<OnboardingStepResult>,
     /// The Get Started key step's "Test key" result: `None` until pressed.
     key_test: Option<KeyTest>,
     /// Which provider and key `key_test` is about, as a fingerprint of the field — never the key
     /// itself. A result is only shown while both still match, so a ✓ for one key cannot sit
     /// under a different key or provider.
     key_tested: Option<(String, u64)>,
-    /// Steps the user chose to skip for this session: the auto-run walks past them. Skipping
-    /// a required one never counts as finishing onboarding, so it comes back next launch.
+    /// Steps the user chose to skip for this session. Skipping a required one never counts as
+    /// finishing onboarding, so it comes back next launch.
     onboarding_skipped: Vec<&'static str>,
     onboarding_focus: gpui::FocusHandle,
     /// A run paused at the approval gate: the command it wants to run, awaiting a
@@ -2621,6 +2703,12 @@ struct Workbench {
     /// What each provider last said it offers — see [`catalogue`]. Read from disk at launch and
     /// replaced in place when a refresh lands, so the picker never blocks on the network.
     catalogue: catalogue::Catalogue,
+    /// What Settings → Model found when it asked each model to call a tool, keyed by
+    /// [`catalogue::model_check_key`]. Definitive answers are also on disk, so a model is not
+    /// checked again on every visit.
+    model_checks: HashMap<String, catalogue::ToolSupport>,
+    /// Checks in flight, by the same key, so one model is never asked twice at once.
+    model_checks_running: HashSet<String>,
     /// Whose key the API-key field is about to set.
     ///
     /// **Separate from the coordinator's provider on purpose.** A specialist may run on a second
@@ -2917,13 +3005,12 @@ impl Workbench {
             settings_section: Section::default(),
             report: None,
             checking: false,
-            judge_after_recheck: false,
+            recheck_pending: false,
+            locally_done: HashMap::new(),
+            restart_required: false,
             running_fix: None,
+            asta_sign_in_deadline: None,
             onboarding_open: false,
-            onboarding_auto_running: false,
-            onboarding_step: None,
-            onboarding_awaiting_manual: None,
-            onboarding_history: Vec::new(),
             key_test: None,
             key_tested: None,
             onboarding_skipped: Vec::new(),
@@ -2986,6 +3073,11 @@ impl Workbench {
             confirming_delete: None,
             confirming_provider: None,
             catalogue: catalogue::load(),
+            model_checks: catalogue::load_model_checks()
+                .into_iter()
+                .map(|(key, check)| (key, check.support))
+                .collect(),
+            model_checks_running: HashSet::new(),
             key_target: stored.provider.clone(),
             sources_open: false,
             datasets_open: false,
@@ -3497,15 +3589,25 @@ impl Workbench {
     /// the Linux keychain client panics if called from a Tokio worker (docs §22).
     fn run_preflight(&mut self, cx: &mut Context<Self>) {
         if self.checking {
+            self.recheck_pending = true;
             return;
         }
         self.checking = true;
         let has_key = settings::secret(&settings::Settings::load().key_name()).is_some();
         let mut results = self.sidecar.preflight(has_key);
         cx.spawn(async move |this, cx| {
-            if let Some(report) = results.next().await {
+            if let Some(mut report) = results.next().await {
                 let _ = this.update(cx, |workbench, cx| {
                     workbench.checking = false;
+                    for check in &mut report.checks {
+                        if let Some((state, detail)) = workbench.locally_done.get(check.id) {
+                            check.state = *state;
+                            check.detail = detail.clone();
+                            if *state == preflight::State::Pass {
+                                check.fixes.clear();
+                            }
+                        }
+                    }
                     // Name the *first* blocker rather than a count: "2 to fix" still
                     // leaves the user opening the pane to find out what.
                     workbench.status = match report.first_problem() {
@@ -3513,25 +3615,21 @@ impl Workbench {
                         None => format!("setup: {}", report.summary()),
                     };
                     let blocked = !report.ready();
-                    workbench.report = Some(report);
                     // A failed fix whose own check now passes is no longer news. Kept, it drew
-                    // "Install Ubuntu — failed" under a green WSL2 runtime row and left the
-                    // primary button on "Retry", offering to repeat an install that the check
-                    // had just shown was working (the elevated install's result is judged by
-                    // its window closing, not by what it did).
-                    if workbench.running_fix.as_ref().is_some_and(|fix| {
-                        fix.done && !fix.ok && !workbench.still_unfixed(fix.check_id)
-                    }) {
-                        workbench.running_fix = None;
+                    // "Install Ubuntu — failed" under a green WSL2 runtime row and offered Retry
+                    // on an install the check had just shown was working (the elevated install's
+                    // result is judged by its window closing, not by what it did).
+                    if let Some(fix) = &workbench.running_fix {
+                        let now_passes = report.checks.iter().any(|check| {
+                            check.id == fix.check_id && check.state == preflight::State::Pass
+                        });
+                        if fix.done && !fix.ok && now_passes {
+                            workbench.running_fix = None;
+                        }
                     }
-                    if std::mem::take(&mut workbench.judge_after_recheck) {
-                        workbench.judge_finished_fix();
-                    }
-                    if workbench.onboarding_auto_running {
-                        // A re-check triggered by the auto-run itself (either the very first
-                        // one, or the one a successful fix always triggers) — advance to the
-                        // next pending step, or land on "Done".
-                        workbench.onboarding_advance(cx);
+                    workbench.report = Some(report);
+                    if std::mem::take(&mut workbench.recheck_pending) {
+                        workbench.run_preflight(cx);
                     } else if !workbench.onboarding_open && blocked {
                         // A first-run report opens the guided pane on its own, same as
                         // always. But so does any later one: a mandatory step (a `Fail`,
@@ -3553,38 +3651,55 @@ impl Workbench {
     /// none, because the whole point is to reflect what the machine is like *now*.
     fn open_onboarding(&mut self, cx: &mut Context<Self>) {
         self.onboarding_open = true;
-        self.onboarding_auto_running = false;
-        self.onboarding_step = None;
-        self.onboarding_awaiting_manual = None;
-        self.onboarding_history.clear();
         self.onboarding_skipped.clear();
+        // A fresh look at the machine: last session's results, and a finished fix's leftover
+        // ✓ or ✗, would otherwise sit over rows this check is about to answer for real.
+        self.locally_done.clear();
+        if self.running_fix.as_ref().is_some_and(|fix| fix.done) {
+            self.running_fix = None;
+        }
         self.run_preflight(cx);
     }
 
-    /// The next check the sequence still has to deal with: failing or warning, and not one
-    /// the user skipped. Shared by the sequencer and the modal's primary button.
-    fn onboarding_next_check(&self) -> Option<&preflight::Check> {
-        self.report.as_ref()?.checks.iter().find(|check| {
-            matches!(check.state, preflight::State::Fail | preflight::State::Warn)
-                && !self.onboarding_skipped.contains(&check.id)
-        })
+    /// Whether Setup has something in flight — a fix running, or a check. While it does, no
+    /// button that could move on or start something else may be pressed: leaving halfway
+    /// through an install is how a setup ends up half-done and failing later for no stated
+    /// reason.
+    fn setup_busy(&self) -> bool {
+        self.checking || self.running_fix.as_ref().is_some_and(|fix| !fix.done)
     }
 
-    /// Bound to a row's "Skip this step": walk past it and carry on with the rest.
+    /// Record a row as finished by the action just taken, without checking it again.
+    fn mark_check_done(
+        &mut self,
+        check_id: &'static str,
+        state: preflight::State,
+        detail: String,
+    ) {
+        if let Some(check) = self
+            .report
+            .as_mut()
+            .and_then(|report| report.checks.iter_mut().find(|check| check.id == check_id))
+        {
+            check.state = state;
+            check.detail = detail.clone();
+            if state == preflight::State::Pass {
+                check.fixes.clear();
+            }
+        }
+        self.locally_done.insert(check_id, (state, detail));
+    }
+
+    /// Bound to the key step's "Skip this step".
     fn skip_onboarding_step(&mut self, check_id: &'static str, cx: &mut Context<Self>) {
         if !self.onboarding_skipped.contains(&check_id) {
             self.onboarding_skipped.push(check_id);
         }
-        if self.onboarding_awaiting_manual == Some(check_id) {
-            self.onboarding_awaiting_manual = None;
-        }
-        self.onboarding_auto_running = true;
-        self.onboarding_advance(cx);
         cx.notify();
     }
 
-    /// Bound to the key step's Save: file the pasted key where every turn reads it, then
-    /// re-check — and resume the sequence if it was paused on this step.
+    /// Bound to the key step's Save: file the pasted key where every turn reads it, and mark
+    /// the step done — storing it was the whole step, so there is nothing left to check.
     fn save_onboarding_key(&mut self, cx: &mut Context<Self>) {
         let value = self.field_text(Field::ApiKey, cx);
         if value.is_empty() {
@@ -3606,11 +3721,12 @@ impl Workbench {
         // rather than on the next Settings save.
         self.sidecar.set_model(model_choice(&stored));
         self.say("API key stored", cx);
-        if self.onboarding_awaiting_manual == Some("model-key") {
-            self.resume_onboarding(cx);
-        } else {
-            self.run_preflight(cx);
-        }
+        self.mark_check_done(
+            "model-key",
+            preflight::State::Pass,
+            "your API key is stored securely on this device".into(),
+        );
+        cx.notify();
     }
 
     /// Show the API key field's placeholder as asterisks when the chosen provider already has a
@@ -3670,6 +3786,85 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Ask `model` (at `provider`) to call one tool, and remember what that shows.
+    ///
+    /// Run when a model is picked, for the coordinator or a specialist, and from "Check model"
+    /// (`force`). Informs only: nothing is blocked on the answer.
+    fn check_model(
+        &mut self,
+        provider: String,
+        model: String,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let model = model.trim().to_string();
+        if model.is_empty() {
+            return;
+        }
+        let base_url = self.draft.base_url.clone();
+        let key = catalogue::model_check_key(&provider, &base_url, &model);
+        if self.model_checks_running.contains(&key)
+            || (!force && self.model_checks.get(&key).is_some_and(|known| known.is_definitive()))
+        {
+            return;
+        }
+        // Read here, on the main thread — the keychain is not safe to touch from a Tokio worker.
+        let Some(api_key) = settings::secret(&format!("llm:{provider}")) else {
+            self.model_checks.insert(
+                key,
+                catalogue::ToolSupport::Unknown("add an API key for this provider first".into()),
+            );
+            cx.notify();
+            return;
+        };
+        self.model_checks_running.insert(key.clone());
+        let mut done = self.sidecar.check_model_tools(provider, base_url, api_key, model);
+        cx.spawn(async move |this, cx| {
+            let support = done.next().await.unwrap_or_else(|| {
+                catalogue::ToolSupport::Unknown("the check did not answer".into())
+            });
+            let _ = this.update(cx, |workbench, cx| {
+                workbench.model_checks_running.remove(&key);
+                workbench.model_checks.insert(key, support);
+                workbench.save_model_checks();
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Write the definitive checks to disk. Failing to is not worth interrupting anyone for:
+    /// the cost is one more check next time.
+    fn save_model_checks(&self) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let mut stored = catalogue::load_model_checks();
+        for (key, support) in &self.model_checks {
+            if support.is_definitive() && !stored.get(key).is_some_and(|known| &known.support == support) {
+                stored.insert(
+                    key.clone(),
+                    catalogue::ModelCheck { support: support.clone(), checked_ms: now_ms },
+                );
+            }
+        }
+        if let Err(error) = catalogue::save_model_checks(&stored) {
+            tracing::warn!(%error, "could not remember the model checks");
+        }
+    }
+
+    /// The result of [`Workbench::check_model`] for `model` at `provider`, as a line to show.
+    /// `None` until a check has started.
+    fn model_check_line(&self, provider: &str, model: &str) -> Option<(u32, String)> {
+        let key = catalogue::model_check_key(provider, &self.draft.base_url, model.trim());
+        if self.model_checks_running.contains(&key) {
+            return Some((theme::text_muted(), "Checking this model…".to_string()));
+        }
+        self.model_checks.get(&key).map(tool_support_message)
+    }
+
     /// Whether the "Test key" result still describes what is on screen: same provider, same text
     /// in the key field.
     fn key_test_is_current(&self, cx: &App) -> bool {
@@ -3677,119 +3872,6 @@ impl Workbench {
         self.key_tested.as_ref().is_some_and(|(provider, fingerprint)| {
             *provider == self.draft.provider && *fingerprint == key_fingerprint(&typed)
         })
-    }
-
-    /// Bound to the modal's "Get Started" button: begin auto-running every pending check's
-    /// fix in sequence.
-    fn start_onboarding(&mut self, cx: &mut Context<Self>) {
-        self.onboarding_auto_running = true;
-        self.onboarding_advance(cx);
-    }
-
-    /// The one-button sequencer. Finds the next check that still needs work and either runs
-    /// its fix, pauses for the user to act on it by hand, or — if nothing is left — marks
-    /// onboarding complete.
-    ///
-    /// A thin driver on top of `run_preflight`/`start_fix`, not a parallel execution path:
-    /// it is re-entered from the tail of both, so a fix finishing and a re-check resolving
-    /// both funnel back through here.
-    fn onboarding_advance(&mut self, cx: &mut Context<Self>) {
-        if !self.onboarding_auto_running {
-            return;
-        }
-        let Some(report) = &self.report else {
-            // Still checking — `run_preflight`'s completion handler calls back in here.
-            return;
-        };
-        let ready = report.ready();
-        let Some(check) = self.onboarding_next_check().cloned() else {
-            // Nothing left to fix, or only steps the user skipped. A skipped *required* step
-            // means onboarding is not finished, so it is not recorded as such.
-            self.onboarding_auto_running = false;
-            self.onboarding_step = None;
-            if ready {
-                self.mark_onboarded();
-            }
-            return;
-        };
-        // The step we were driving just resolved (successfully, since the auto-run only
-        // ever reaches here again via a successful fix's re-check) — collapse it to a
-        // one-line verdict before moving the spotlight to the next row.
-        if let Some(previous) = self.onboarding_step {
-            if previous != check.id {
-                if let Some(fix) = &self.running_fix {
-                    if fix.check_id == previous && fix.done && fix.ok {
-                        self.onboarding_history.push(OnboardingStepResult {
-                            check_id: previous,
-                            label: fix.label.clone(),
-                            ok: true,
-                        });
-                    }
-                }
-            }
-        }
-        self.onboarding_step = Some(check.id);
-        match check.fixes.first() {
-            None => {
-                // A Fail/Warn with no fix at all — nothing the auto-run can do; stop rather
-                // than spin.
-                self.onboarding_auto_running = false;
-            }
-            Some(preflight::Fix::Run { label, argv, .. }) => {
-                if self.running_fix.as_ref().is_some_and(|fix| !fix.done) {
-                    // Already running (this fix's own success re-check just landed) — wait
-                    // for its callback rather than starting a second command.
-                    return;
-                }
-                // This exact fix already reported success against this exact check, and the
-                // check still isn't passing — `judge_finished_fix` has already explained why
-                // (most often: WSL installed, but Windows needs a restart before the distro
-                // can start). Firing the same command again is not a second attempt, it is a
-                // loop: on a real machine that meant a fresh UAC prompt every few seconds
-                // instead of the restart notice ever reaching the user. Stop and wait for
-                // them instead.
-                if self
-                    .running_fix
-                    .as_ref()
-                    .is_some_and(|fix| fix.check_id == check.id && fix.ok)
-                {
-                    self.onboarding_auto_running = false;
-                    self.onboarding_awaiting_manual = Some(check.id);
-                    return;
-                }
-                self.start_fix(label.to_string(), argv.clone(), check.id, cx);
-            }
-            Some(preflight::Fix::Manual(_)) | Some(preflight::Fix::EnterKey) => {
-                self.onboarding_auto_running = false;
-                self.onboarding_awaiting_manual = Some(check.id);
-            }
-        }
-    }
-
-    /// Bound to "Retry" after a fix fails: re-check, then re-issue the fix only if the step
-    /// still fails.
-    ///
-    /// **Re-checked first, because a fix can fail and still have worked.** The elevated
-    /// `wsl --install -d Ubuntu` is judged by its window closing, not by what it did, and a
-    /// researcher who closed it after Ubuntu's first-launch prompt saw the step stay red over a
-    /// distro that was installed and answering. Retry advanced on that stale report, so it
-    /// re-ran the install, which
-    /// errors on an existing distro in a window this app cannot read: "failed. Nothing to show
-    /// here", on every press, forever. The re-check's completion calls `onboarding_advance`
-    /// (because `onboarding_auto_running` is set), which moves on if the step now passes and
-    /// runs the fix again if it does not.
-    fn retry_onboarding_step(&mut self, cx: &mut Context<Self>) {
-        self.onboarding_auto_running = true;
-        self.run_preflight(cx);
-    }
-
-    /// Bound to "Continue" once the user has done whatever a `Fix::Manual` step
-    /// needed outside the app: re-check, and resume the sequence if that step now passes.
-    fn resume_onboarding(&mut self, cx: &mut Context<Self>) {
-        let awaited = self.onboarding_awaiting_manual;
-        self.onboarding_auto_running = true;
-        self.onboarding_step = awaited;
-        self.run_preflight(cx);
     }
 
     /// Record that onboarding is done — either everything passed, or the user chose to skip
@@ -3999,76 +4081,66 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Whether the named row is still not passing, according to the latest report.
-    fn still_unfixed(&self, check_id: &str) -> bool {
-        self.report.as_ref().is_some_and(|report| {
-            report
-                .checks
-                .iter()
-                .any(|check| check.id == check_id && check.state != preflight::State::Pass)
-        })
-    }
-
     /// What colour the app's own remarks about a fix should be.
-    ///
-    /// Read from the current report rather than stored, so "restart Windows" is amber while
-    /// it is still true and goes quiet by itself once the row it names turns green.
     fn fix_tone(&self, fix: &RunningFix) -> u32 {
-        if !fix.done {
-            theme::text_muted()
-        } else if !fix.ok {
+        if fix.done && !fix.ok {
             theme::error()
-        } else if self.still_unfixed(fix.check_id) {
-            theme::warning()
         } else {
             theme::text_muted()
         }
     }
 
-    /// Say so when a fix reported success and changed nothing.
-    ///
-    /// A machine with WSL but no distro ran `wsl --install -d Ubuntu`, which installed the
-    /// WSL runtime, exited 0 — and left the distro unregistered until Windows restarts. The
-    /// pane said "Install Ubuntu — done" directly above the same red row it had started
-    /// from, which reads as a bug in the app rather than as a step the user still has to
-    /// take (docs §60).
-    ///
-    /// The verdict is drawn from the re-check, never from the command's own words: `wsl.exe`
-    /// speaks the system language — the machine this came from printed *"Descargando:
-    /// Subsistema de Windows para Linux"* — so matching on "restart" would have failed for
-    /// exactly the user who needed it.
-    fn judge_finished_fix(&mut self) {
-        let check_id = match &self.running_fix {
-            Some(fix) if fix.ok => fix.check_id,
-            _ => return,
+    /// Run the same fix again for the row whose last attempt failed.
+    fn retry_fix(&mut self, check_id: &'static str, cx: &mut Context<Self>) {
+        let Some(fix) = self
+            .running_fix
+            .as_ref()
+            .filter(|fix| fix.check_id == check_id && fix.done)
+        else {
+            return;
         };
-        if !self.still_unfixed(check_id) {
+        let (label, argv) = (fix.label.clone(), fix.argv.clone());
+        self.start_fix(label, argv, check_id, cx);
+    }
+
+    /// Mark the row a fix was for as done, from the fix's own success.
+    fn finish_successful_fix(&mut self, check_id: &'static str, cx: &mut Context<Self>) {
+        if check_id == "asta" {
+            let output = self
+                .running_fix
+                .as_ref()
+                .map(|fix| fix.lines.join("\n"))
+                .unwrap_or_default();
+            let (state, detail) = asta_sign_in_result(&output);
+            self.mark_check_done("asta", state, detail);
+            // The backend reads the Asta token when it starts (`backend::mint_asta_token`), so
+            // a sign-in only reaches it through a restart. Done here instead of asking the
+            // researcher to close and reopen the app.
+            self.restart_backend_with(false, cx);
             return;
         }
-        let Some(fix) = self.running_fix.as_mut() else {
-            return;
-        };
-        // Only the runtime row installs WSL itself, and only Windows reboots for it.
         if check_id == "runtime" && cfg!(windows) {
-            fix.notes.push(
-                "— That installed WSL, but Windows has to restart before a distro can \
-                 start. Restart this machine, open the app again, and this row should be \
-                 green."
-                    .into(),
-            );
+            // `wsl --install` exits 0 with the distro still unregistered until Windows
+            // restarts, so the row cannot honestly be green yet (docs §60).
+            self.restart_required = true;
         } else {
-            fix.notes.push(
-                "— It reported success but the check still fails. The output above is the \
-                 best clue; the sidecar log below has the rest."
-                    .into(),
-            );
+            self.mark_check_done(check_id, preflight::State::Pass, "Installed".into());
+        }
+        // A backend set up (or updated) after launch has nothing running it: the launch-time
+        // start already failed on the missing folder. Started here, without the re-check a
+        // restart normally ends with.
+        if matches!(check_id, "checkout" | "backend-build") {
+            self.restart_backend_with(false, cx);
+        }
+        // Rows skipped because this one was missing have never been checked at all.
+        let unchecked = self.report.as_ref().is_some_and(|report| {
+            report.checks.iter().any(|check| check.state == preflight::State::Skip)
+        });
+        if unchecked && !self.restart_required {
+            self.run_preflight(cx);
         }
     }
 
-    /// Run a fix on the user's behalf, streaming its output into the pane.
-    ///
-    /// Re-checks automatically when it finishes, so a successful install turns its own
-    /// row green without the user having to work out that they should press Re-check.
     /// Stop the repair that is running, if one is.
     ///
     /// **Says `stopping`, not `stopped`.** The only honest report of a stop is the command
@@ -4099,6 +4171,13 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Run a fix on the user's behalf, streaming its output into its row.
+    ///
+    /// **A clean exit is the verdict.** A fix that finishes successfully marks its own row done
+    /// and nothing is checked again; re-checking after every install was slow, briefly showed
+    /// other rows in a misleading state, and judged success by a second, racier probe. Rows that
+    /// were *never* checked because this one was missing (`State::Skip`) are the exception:
+    /// they are checked now, for the first time.
     fn start_fix(
         &mut self,
         label: String,
@@ -4110,17 +4189,39 @@ impl Workbench {
             return;
         }
         self.status = format!("running: {label}");
-        let (events, cancel) = self.sidecar.run_fix(argv);
+        let (events, cancel) = self.sidecar.run_fix(argv.clone());
         self.running_fix = Some(RunningFix {
             label,
             link: None,
             lines: Vec::new(),
             notes: Vec::new(),
             check_id,
+            argv,
             done: false,
             ok: false,
+            show_details: false,
+            scan_sign_in: check_id == "asta",
+            browser_opened: false,
+            timed_out: false,
             cancel: cancel.clone(),
             stopping: false,
+        });
+        self.asta_sign_in_deadline = (check_id == "asta").then(|| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(ASTA_SIGN_IN_TIMEOUT).await;
+                let _ = this.update(cx, |workbench, cx| {
+                    let waiting = workbench
+                        .running_fix
+                        .as_ref()
+                        .is_some_and(|fix| fix.check_id == "asta" && !fix.done);
+                    if waiting {
+                        if let Some(fix) = workbench.running_fix.as_mut() {
+                            fix.timed_out = true;
+                        }
+                        workbench.stop_fix(cx);
+                    }
+                });
+            })
         });
         let mut events = events;
         cx.spawn(async move |this, cx| {
@@ -4136,12 +4237,24 @@ impl Workbench {
                             // browser there. Catching the URL is what lets the app open it
                             // on the host, where the browser is (docs §32c).
                             //
-                            // Only for a sign-in. Every other fix's URLs are output, not a
-                            // page to visit: "Install the Asta CLI" prints uv's
+                            // Only for a sign-in, and only a link that carries a device code.
+                            // Every other URL is output, not a page to visit: the Asta action
+                            // installs first, and uv prints
                             // `(from git+https://github.com/allenai/asta-plugins.git@<sha>)`,
-                            // which became an "Open sign-in page" button pointing at GitHub.
-                            if fix.link.is_none() && fix.label.contains("Sign in") {
-                                fix.link = first_url(&line);
+                            // which once became an "Open sign-in page" button pointing at GitHub.
+                            if fix.scan_sign_in && fix.link.is_none() {
+                                fix.link = first_url(&line)
+                                    .filter(|link| device_code(link).is_some());
+                            }
+                            // Opened for the researcher rather than left behind a button:
+                            // approving in the browser is the only thing they have to do.
+                            if !fix.browser_opened {
+                                if let Some(link) = fix.link.clone() {
+                                    fix.browser_opened = true;
+                                    if let Err(error) = open_in_browser(&link) {
+                                        tracing::warn!(%error, "could not open the sign-in page");
+                                    }
+                                }
                             }
                             fix.lines.push(line);
                             if fix.lines.len() > FIX_LOG_LINES {
@@ -4153,38 +4266,13 @@ impl Workbench {
                             fix.done = true;
                             fix.ok = ok;
                             fix.notes.push(format!("— {note}"));
-                            // Credentials are read into the backend's environment when it
-                            // *starts*, so signing in while it runs changes nothing until
-                            // it is restarted. Saying so is the difference between a fix
-                            // that works and one that looks broken — signing in from this
-                            // pane and then watching the same failure is exactly what
-                            // happened the first time (docs §32).
-                            if ok && fix.label.contains("Sign in") {
-                                fix.notes.push(
-                                    "— Close and reopen the app: the backend reads your \
-                                     Asta sign-in when it starts."
-                                        .into(),
-                                );
-                            }
                             workbench.status =
                                 format!("{}: {note}", if ok { "done" } else { "failed" });
-                            // Re-check on success so the row the user just fixed goes
-                            // green by itself — and so that a fix which succeeded without
-                            // fixing anything gets found out. See `judge_finished_fix`.
+                            if check_id == "asta" {
+                                workbench.asta_sign_in_deadline = None;
+                            }
                             if ok {
-                                workbench.judge_after_recheck = true;
-                                workbench.run_preflight(cx);
-                                // A backend set up (or updated) after launch has nothing
-                                // running it: the launch-time start already failed on the
-                                // missing folder. Start it now instead of leaving that to a
-                                // Restart button nobody knows to press.
-                                if matches!(check_id, "checkout" | "backend-build") {
-                                    workbench.restart_backend(cx);
-                                }
-                            } else if workbench.onboarding_auto_running {
-                                // Stop the sequence here — the log stays up as-is, and the
-                                // modal's primary button switches to "Retry".
-                                workbench.onboarding_auto_running = false;
+                                workbench.finish_successful_fix(check_id, cx);
                             }
                         }
                     }
@@ -4462,6 +4550,13 @@ impl Workbench {
     }
 
     fn restart_backend(&mut self, cx: &mut Context<Self>) {
+        self.restart_backend_with(true, cx);
+    }
+
+    /// `recheck` is false when Setup restarts the backend after its own successful fix: that
+    /// fix already decided its row, and a re-check would undo the "no re-check" rule of
+    /// [`Workbench::start_fix`].
+    fn restart_backend_with(&mut self, recheck: bool, cx: &mut Context<Self>) {
         if self.streaming {
             self.say("can't restart the backend mid-turn", cx);
             return;
@@ -4504,7 +4599,9 @@ impl Workbench {
                 // the specialist list the backend writes as it assembles a coordinator.
                 workbench.conversations_loaded = false;
                 workbench.refresh_conversations(cx);
-                workbench.run_preflight(cx);
+                if recheck {
+                    workbench.run_preflight(cx);
+                }
                 // **And ask again which research services answered.** `unavailable_mcps` was
                 // written only by `warm_up`, which runs once at startup, so a restart left the
                 // notice reporting whatever had been true when the app opened. A researcher who
@@ -4806,18 +4903,32 @@ impl Workbench {
                 // call tools fails on the first request, so the turn has no answer at all and the
                 // red line held a provider's raw error and a log path. The question gets a reply
                 // saying what to change instead; the raw error stays in the log.
-                if model_cannot_use_tools(&message) {
+                // Checked before `model_cannot_use_tools`: both mention tools, and only this one
+                // names `tool_choice`.
+                let explained = if model_refuses_forced_tools(&message) {
+                    tracing::warn!(%message, "the model refuses to be required to call a tool");
+                    Some((
+                        FORCED_TOOLS_REPLY,
+                        "this model can't be required to call a tool — choose another in Settings",
+                    ))
+                } else if model_cannot_use_tools(&message) {
                     tracing::warn!(%message, "the model cannot use tools");
+                    Some((
+                        NO_TOOLS_REPLY,
+                        "this model can't use tools — choose another in Settings",
+                    ))
+                } else {
+                    None
+                };
+                if let Some((reply, status)) = explained {
                     match self.transcript.last_mut() {
                         Some(last) if last.role == "mini-me" && last.body.is_empty() => {
-                            last.push_body(NO_TOOLS_REPLY);
+                            last.push_body(reply);
                         }
-                        _ => self
-                            .transcript
-                            .push(Message::new("mini-me", NO_TOOLS_REPLY.to_string())),
+                        _ => self.transcript.push(Message::new("mini-me", reply.to_string())),
                     }
                     self.finish_turn(cx);
-                    self.status = "this model can't use tools — choose another in Settings".into();
+                    self.status = status.into();
                     self.error = None;
                     return;
                 }
@@ -5306,7 +5417,7 @@ impl Workbench {
                     workbench
                         .transcript
                         .retain(|message| message.role != "mini-me" || !message.is_silent());
-                    // **And pick up any long run still going.** A theorizer or DataVoyager task
+                    // **And pick up any long run still going.** A theorizer task
                     // lives on Asta's own service, keyed by a task id the thread's artifacts
                     // carry — so closing the window never stopped the work, only our watching of
                     // it. The state we just fetched for the messages already holds those ids,
@@ -5897,8 +6008,8 @@ impl Workbench {
             .map(|name| name.to_ascii_lowercase())
             .collect();
 
-        // **A file a run has not finished writing is not a file that is missing.** DataVoyager and
-        // the theorizer submit and return immediately; their outputs land at
+        // **A file a run has not finished writing is not a file that is missing.** Long jobs such
+        // as the theorizer submit and return immediately; their outputs land at
         // `analysis/<task_id>.md` when the run reaches a terminal state, twenty to forty minutes
         // later. So the answer that says *"the results will appear in the Analysis panel when the
         // run completes"* was flagged for not holding a file it had just explained was forthcoming
@@ -7233,6 +7344,15 @@ impl Workbench {
         // request. The port and execution locality are baked into the launch command, so
         // those need a restart — say so rather than letting the user wonder.
         self.sidecar.set_model(model_choice(&self.draft));
+        // A typed model id reaches the check here, the first moment it is final; a picked one
+        // was checked on the click and is remembered, so this costs nothing twice. Specialists
+        // too: a key saved just now may be what lets their check run at all.
+        self.check_model(self.draft.provider.clone(), self.draft.model_id.clone(), false, cx);
+        for spec in self.draft.subagents.values().cloned().collect::<Vec<_>>() {
+            if let Some((provider, model)) = spec.split_once("::") {
+                self.check_model(provider.to_string(), model.to_string(), false, cx);
+            }
+        }
         let mut note = String::from("Saved.");
         if !stored.is_empty() {
             note.push_str(&format!(" Stored: {}.", stored.join(", ")));
@@ -7523,16 +7643,16 @@ impl Workbench {
 
     /// Long jobs still running, and the ones that finished this session.
     ///
-    /// The theorizer and DataVoyager return a task id immediately and finish minutes
+    /// The theorizer returns a task id immediately and finishes minutes
     /// later, so without this the answer to "is it still going?" was nothing at all —
     /// and, worse, nobody was collecting the result (docs §29).
     ///
     /// **Foldable, and bounded when open.** Asked for directly: *"we need to make the ui of
     /// background jobs plegable and scrolable. when we have a lot of text like for data voyager
     /// its disruptive at sight."* A job row carries the question it was launched with, and a
-    /// DataVoyager question is a paragraph *by design* — the four rules in `subagents.py` make it
-    /// name the datasets, name the methods and ask for the numbers — so one row could fill the
-    /// column and push `OUTPUTS` and `SOURCES` off the bottom of it. Three bounds, cheapest
+    /// DataVoyager question (that specialist has since been removed) was a paragraph *by
+    /// design* — the four rules in `subagents.py` made it name the datasets, name the methods
+    /// and ask for the numbers — so one row could fill the column and push `OUTPUTS` and `SOURCES` off the bottom of it. Three bounds, cheapest
     /// first: the question is clipped to [`JOB_QUESTION_CHARS`], the list scrolls within
     /// [`JOBS_BODY_HEIGHT`], and the section folds to a single line.
     ///
@@ -7942,7 +8062,6 @@ impl Workbench {
                             kind: protocol::JobKind::Discovery,
                             task_id: draft.run_id.clone(),
                             question: draft.name.clone(),
-                            context_id: None,
                             status: status.clone(),
                             size: Some(u64::from(cost.experiments)),
                         },
@@ -8065,7 +8184,6 @@ impl Workbench {
                                     kind: protocol::JobKind::Discovery,
                                     task_id: run_id.clone(),
                                     question: kind.clone(),
-                                    context_id: None,
                                     status: "running".to_string(),
                                     size: Some(u64::from(experiments)),
                                 },
@@ -8889,7 +9007,6 @@ mod tests {
                 kind,
                 task_id: "20840df8-a8e8-4ab0-a65c-1b1824961955".into(),
                 question: "SOC modelling".into(),
-                context_id: None,
                 status: "completed".into(),
                 size: None,
             },
@@ -9280,10 +9397,10 @@ mod tests {
 
     #[test]
     fn one_collected_run_is_named_and_openable() {
-        let runs = [collected(protocol::JobKind::Analysis, "01a0215f-c66b-7461-96f2-595a168fa8f8")];
+        let runs = [collected(protocol::JobKind::Discovery, "01a0215f-c66b-7461-96f2-595a168fa8f8")];
         // The label names what finished rather than counting it.
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].1.kind.label(), "Data analysis");
+        assert_eq!(runs[0].1.kind.label(), "Discovery");
         assert_eq!(runs[0].0, "01a0215f-c66b-7461-96f2-595a168fa8f8");
     }
 
@@ -9291,7 +9408,7 @@ mod tests {
     #[test]
     fn several_collected_runs_are_counted_rather_than_opened() {
         let runs = [
-            collected(protocol::JobKind::Analysis, "aaa"),
+            collected(protocol::JobKind::Discovery, "aaa"),
             collected(protocol::JobKind::Theorizer, "bbb"),
         ];
         assert!(runs.len() > 1);
@@ -9311,10 +9428,9 @@ mod tests {
     #[test]
     fn a_finished_run_is_not_swept_again() {
         let base = protocol::Job {
-            kind: protocol::JobKind::Analysis,
+            kind: protocol::JobKind::Discovery,
             task_id: "t".into(),
             question: "q".into(),
-            context_id: None,
             status: String::new(),
             size: None,
         };
@@ -9332,13 +9448,12 @@ mod tests {
     #[test]
     fn a_file_a_running_job_has_not_written_yet_is_not_missing() {
         let task = "4c290c71-be43-421a-8273-2f98dcc7b331";
-        let named = format!("analysis/{task}.md");
+        let named = format!("discovery/{task}.md");
 
         let running = protocol::Job {
-            kind: protocol::JobKind::Analysis,
+            kind: protocol::JobKind::Discovery,
             task_id: task.to_string(),
             question: "SOC modelling".into(),
-            context_id: None,
             status: "working".into(),
             size: None,
         };
@@ -9359,14 +9474,13 @@ mod tests {
     #[test]
     fn an_unrelated_filename_is_not_exempted_by_a_running_job() {
         let running = protocol::Job {
-            kind: protocol::JobKind::Analysis,
+            kind: protocol::JobKind::Discovery,
             task_id: "4c290c71-be43-421a-8273-2f98dcc7b331".into(),
             question: "q".into(),
-            context_id: None,
             status: "working".into(),
             size: None,
         };
-        for other in ["eda_distributions.png", "analysis/deadbeef-0000.md", "final_report.md"] {
+        for other in ["eda_distributions.png", "discovery/deadbeef-0000.md", "final_report.md"] {
             assert!(
                 !other.to_ascii_lowercase().contains(&running.task_id.to_ascii_lowercase()),
                 "{other} must still be checked"
@@ -9457,8 +9571,8 @@ mod tests {
             ..Default::default()
         }];
         let mut buckets = vec![protocol::Bucket {
-            name: "analyses",
-            items: vec!["Existing analysis".into()],
+            name: "discoveries",
+            items: vec!["Existing discovery".into()],
         }];
 
         sync_library_bucket(&mut buckets, &documents);
@@ -9467,7 +9581,7 @@ mod tests {
 
         sync_library_bucket(&mut buckets, &[]);
         assert_eq!(buckets.len(), 1);
-        assert_eq!(buckets[0].name, "analyses");
+        assert_eq!(buckets[0].name, "discoveries");
     }
 
     #[test]
@@ -10177,6 +10291,19 @@ mod tests {
         assert!(fold_steps(&[]).is_empty());
     }
 
+    #[test]
+    fn commands_are_totalled_across_folds() {
+        let steps: Vec<String> = ["execute", "execute", "validate_dataset", "execute"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(command_total(&steps).as_deref(), Some("3 commands in total"));
+
+        // One command needs no total; its own line already says it.
+        assert_eq!(command_total(&["execute".to_string()]), None);
+        assert_eq!(command_total(&[]), None);
+    }
+
     /// The fallback for a backend that never streams a delegated namespace's own frames back:
     /// `message.agents` stays empty, so the dot beside the message has to read who was asked
     /// off the coordinator's own "delegating to X" step instead (§310).
@@ -10481,7 +10608,7 @@ mod tests {
                     // is resolved at save time rather than being fixed here.
                     assert!(field.secret_name().is_none());
                 }
-                Field::AstaToken | Field::AstaApiKey => {
+                Field::AstaToken => {
                     assert!(field.is_secret());
                     assert!(field.secret_name().is_some());
                 }
@@ -11087,6 +11214,72 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_setup_fix_is_explained_in_a_sentence_not_a_log() {
+        let lines = |text: &[&str]| text.iter().map(|line| line.to_string()).collect::<Vec<_>>();
+        assert!(failure_summary("asta", &[], true, false).starts_with("Stopped"));
+        // The elevated WSL install runs in its own window and prints nothing here.
+        assert!(failure_summary("runtime", &[], false, false).contains("Administrator approval"));
+        assert!(failure_summary(
+            "asta",
+            &lines(&["error: Failed to fetch: `https://github.com/allenai/asta-plugins.git`"]),
+            false,
+            false,
+        )
+        .contains("internet connection"));
+        assert!(failure_summary(
+            "dependencies",
+            &lines(&["curl: (6) Could not resolve host: pypi.org"]),
+            false,
+            false,
+        )
+        .contains("download failed"));
+        assert_eq!(
+            failure_summary("checkout", &lines(&["something nobody planned for"]), false, false),
+            "The installer stopped with an error."
+        );
+    }
+
+    #[test]
+    fn an_abandoned_sign_in_says_so_rather_than_stopped() {
+        // A timeout is also a stop, and the timeout is the reason worth giving.
+        assert!(failure_summary("asta", &[], true, true).contains("10 minutes"));
+    }
+
+    #[test]
+    fn the_asta_row_is_decided_from_its_own_run() {
+        let status = "│ Local Token Status   │ ✅ Valid                     │
+│ Email                │ researcher@example.org       │
+";
+        let (state, detail) =
+            asta_sign_in_result(&format!("{status}{}yes", preflight::ASTA_THEORY_MARKER));
+        assert_eq!(state, preflight::State::Pass);
+        assert_eq!(detail, "Signed in as researcher@example.org");
+
+        // Without the theorizer permission: still done, because literature search works.
+        let (state, detail) =
+            asta_sign_in_result(&format!("{status}{}no", preflight::ASTA_THEORY_MARKER));
+        assert_eq!(state, preflight::State::Warn);
+        assert!(detail.contains("can't generate research theories"), "{detail}");
+
+        assert_eq!(asta_sign_in_result("").1, "Signed in");
+    }
+
+    #[test]
+    fn a_model_that_refuses_a_required_tool_is_explained_not_called_an_internal_error() {
+        // The turn error from 2026-10-12, Claude Sonnet 5.5 through OpenRouter.
+        let message = "Error code: 400 - {'error': {'message': 'Provider returned error', 'code': \
+                       400, 'metadata': {'raw': '{\"message\":\"tool_choice: type \\\"tool\\\" and \
+                       \\\"any\\\" are not supported for this model.\"}', 'provider_name': 'Amazon \
+                       Bedrock'}}}";
+        assert!(model_refuses_forced_tools(message));
+        assert!(!model_cannot_use_tools(message));
+        // And the other way round: a model with no tools at all is not this case.
+        assert!(!model_refuses_forced_tools(
+            "Error code: 404 - No endpoints found that support tool use."
+        ));
+    }
+
+    #[test]
     fn a_model_that_cannot_call_tools_is_recognised_however_it_is_worded() {
         for message in [
             "stream failed: Error code: 404 - {'error': {'message': 'No endpoints found that \
@@ -11145,7 +11338,7 @@ mod tests {
         assert!(trace.text.chars().count() <= MAX_TRACE_CHARS + 1);
     }
 
-    /// §245: a DataVoyager question is a paragraph by design, and the row is one column wide.
+    /// §245: a long-job question can be a paragraph, and the row is one column wide.
     #[test]
     fn a_long_job_question_is_clipped_for_the_panel() {
         // The shape `subagents.py` asks the coordinator to write: datasets, methods, numbers.
@@ -11169,10 +11362,9 @@ mod tests {
         // And the stored question is untouched — it is also a query parameter the theorizer's
         // poll route sends back.
         let job = protocol::Job {
-            kind: protocol::JobKind::Analysis,
+            kind: protocol::JobKind::Theorizer,
             task_id: "t".into(),
             question: question.to_string(),
-            context_id: None,
             status: "working".into(),
             size: None,
         };

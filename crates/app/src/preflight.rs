@@ -51,6 +51,40 @@ const ASTA_INSTALL_URL: &str = "git+https://github.com/allenai/asta-plugins.git@
 /// generation. Being signed in says nothing about it.
 const THEORY_PERMISSION: &str = "enroll:theory_generation";
 
+/// Printed by [`asta_setup_fix`]'s last command, followed by `yes` or `no`: whether the account
+/// that just signed in holds [`THEORY_PERMISSION`]. Read back from the same run so the row can
+/// be decided without probing again.
+pub(crate) const ASTA_THEORY_MARKER: &str = "MINIME_ASTA_THEORY=";
+
+/// The one Asta action: install the CLI if it is missing, then sign in, then report who signed
+/// in and whether they may generate theories.
+///
+/// **One process, so there is no in-between state to explain.** Installing and signing in used
+/// to be two fixes with a check between them, and that check reported the freshly installed CLI
+/// as "not signed in" — an error, shown to someone who had done nothing wrong. Chained here, the
+/// row goes from Install to either "Signed in as …" or one failure with a reason.
+///
+/// `PATH` is extended by hand because `uv tool update-shell` only takes effect in the *next*
+/// shell, and this one goes on to run `asta`.
+pub(crate) fn asta_setup_fix(config: &BackendConfig, label: &'static str) -> Fix {
+    let script = format!(
+        "command -v asta >/dev/null 2>&1 || {{ uv tool install {url} && uv tool update-shell; }} \
+         && export PATH=\"$HOME/.local/bin:$PATH\" \
+         && asta auth login \
+         && asta auth status \
+         && if asta auth print-token | grep -q {permission}; \
+            then echo {marker}yes; else echo {marker}no; fi",
+        url = shell_quote(ASTA_INSTALL_URL),
+        permission = shell_quote(THEORY_PERMISSION),
+        marker = ASTA_THEORY_MARKER,
+    );
+    Fix::Run {
+        label,
+        argv: config.shell_argv(&script),
+        note: "opens Asta sign-in in your browser — approve it there and this finishes by itself",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     /// Verified present.
@@ -818,7 +852,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     //
     // **Required.** It used to be a warning, on the grounds that the coordinator can answer
     // without `asta`. In practice nearly every specialist leans on it — literature search, the
-    // theorizer, DataVoyager, AutoDiscovery — so a "working" app without it could do almost
+    // theorizer, AutoDiscovery — so a "working" app without it could do almost
     // nothing a researcher came for. Missing or signed out is now a `Fail`, which keeps the
     // guided Setup open until it is fixed. A signed-in account that merely lacks the theorizer
     // permission stays a warning: literature search works for it.
@@ -846,11 +880,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 // `print-token` without `--raw` prints the decoded payload, permissions
                 // and all, so this needs no JWT decoding of our own.
                 let claims = probe(&config.shell_argv("asta auth print-token"));
-                let sign_in = Fix::Run {
-                    label: "Sign in again",
-                    argv: config.shell_argv("asta auth login"),
-                    note: "use the account with theory-generation access",
-                };
+                let sign_in = asta_setup_fix(config, "Sign in again");
                 if claims.ok && !claims.stdout.contains(THEORY_PERMISSION) {
                     checks.push(
                         Check::failing(
@@ -894,13 +924,9 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                         "asta",
                         "Asta CLI",
                         State::Fail,
-                        "installed, but you're not signed in yet — Mini-Me needs this to search \
-                         the literature and run most specialists",
-                        vec![Fix::Run {
-                            label: "Sign in to Asta",
-                            argv: config.shell_argv("asta auth login"),
-                            note: "opens a browser; the app refreshes the token itself after this",
-                        }],
+                        "not signed in — Mini-Me needs this to search the literature and run \
+                         most specialists",
+                        vec![asta_setup_fix(config, "Sign in to Asta")],
                     ),
                 );
             }
@@ -911,21 +937,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                     "Asta CLI",
                     State::Fail,
                     "not installed — needed for literature search and most specialists",
-                    vec![
-                        Fix::Run {
-                            label: "Install the Asta CLI",
-                            argv: config.shell_argv(&format!(
-                                "uv tool install {} && uv tool update-shell",
-                                shell_quote(ASTA_INSTALL_URL)
-                            )),
-                            note: "about a minute",
-                        },
-                        Fix::Manual(
-                            "Afterwards, paste ASTA_TOKEN and ASTA_API_KEY in Settings — the \
-                             CLI reads them from its environment when a command runs."
-                                .into(),
-                        ),
-                    ],
+                    vec![asta_setup_fix(config, "Set up Asta")],
                 ),
             );
         }
@@ -1099,8 +1111,8 @@ fn decode(bytes: &[u8], wide: bool) -> String {
 /// reliable signal either way — a researcher watched it print success text and still exit
 /// non-zero. The only event this app can see at all is the elevated window closing, so that
 /// is what counts: reaching the `exit 0` below means `Start-Process` got as far as running
-/// the program and waiting for it, and `judge_finished_fix` is what turns that into "restart
-/// your machine" rather than a false "done". A refused UAC prompt never reaches that line —
+/// the program and waiting for it, and `Workbench::finish_successful_fix` is what turns that
+/// into "restart your machine" rather than a false "done". A refused UAC prompt never reaches that line —
 /// `Start-Process` raises a *non-terminating* error there, which under `-Command` would fall
 /// straight through to `exit 0`, so `-ErrorAction Stop` makes it terminating and the `catch`
 /// exits 1.
@@ -1422,6 +1434,11 @@ fn status_field(output: &str, property: &str) -> Option<String> {
     })
 }
 
+/// The email `asta auth status` reports, if its table has one.
+pub(crate) fn asta_account(output: &str) -> Option<String> {
+    status_field(output, "Email")
+}
+
 /// A one-line summary of who is signed in and for how long.
 fn asta_identity(output: &str) -> String {
     let email = status_field(output, "Email");
@@ -1741,6 +1758,24 @@ mod tests {
             matches!(&missing.fixes[0], Fix::Manual(note) if note.contains("MINIME_DATAVERSE_SERVER"))
         );
         assert!(dataverse_check("not json").is_none());
+    }
+
+    #[test]
+    fn asta_installs_and_signs_in_as_one_action() {
+        let Fix::Run { argv, .. } = asta_setup_fix(&config(), "Set up Asta") else {
+            panic!("the Asta action must be something the app runs");
+        };
+        let script = argv.join(" ");
+        // Installed only when missing, so pressing it on a machine that has the CLI just signs in.
+        assert!(script.contains("command -v asta"), "{script}");
+        assert!(script.contains("uv tool install"), "{script}");
+        assert!(script.contains("asta auth login"), "{script}");
+        // Read back from the same run: who signed in, and whether they may generate theories.
+        assert!(script.contains("asta auth status"), "{script}");
+        assert!(script.contains(ASTA_THEORY_MARKER), "{script}");
+        let login = script.find("asta auth login").unwrap();
+        assert!(script.find("uv tool install").unwrap() < login, "{script}");
+        assert_eq!(asta_account(REAL_STATUS).as_deref(), Some("piero.palacios@cipotato.org"));
     }
 
     #[test]

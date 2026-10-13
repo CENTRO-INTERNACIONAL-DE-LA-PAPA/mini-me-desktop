@@ -33,7 +33,6 @@ def test_artifact_node_id_per_kind() -> None:
     assert artifact_node_id("file", {"path": "./a.csv"}) == "file:./a.csv"
     assert artifact_node_id("hypothesis", {"question": "Q?"}) == "hypothesis:Q?"
     assert artifact_node_id("library", {"index_path": ".asta/documents"}) == "library:.asta/documents"
-    assert artifact_node_id("analysis", {"question": "A?"}) == "analysis:A?"
 
 
 def test_artifact_node_id_falls_back_to_next_field() -> None:
@@ -135,27 +134,6 @@ def test_library_edges_index_papers() -> None:
     assert "source:Paper B" in targets  # falls back to title
 
 
-def test_analysis_edges_link_dataset_paths() -> None:
-    structured = SimpleNamespace(
-        question="What drives yield?",
-        dataset_paths=["./data/yield.csv", ""],  # empty path is skipped
-        summary="",
-        findings=[],
-        hypotheses_tested=[],
-        charts=[],
-        status="completed",
-        task_id="t",
-        context_id="c",
-    )
-    edges = [e for e in _edges("data_voyager", structured) if e["relation"] == "analyzes"]
-    assert len(edges) == 1
-    edge = edges[0]
-    assert edge["source"] == "analysis:What drives yield?"
-    assert edge["target"] == "file:./data/yield.csv"
-    assert edge["relation"] == "analyzes"
-    assert edge["target_label"] == "yield.csv"  # basename
-
-
 # ---------------------------------------------------------------------------
 # Reducer — edges accumulate and dedup by (source, target, relation).
 # ---------------------------------------------------------------------------
@@ -196,18 +174,6 @@ def _produced_by(edges: list[dict]) -> list[dict]:
     return [e for e in edges if e["relation"] == "produced_by"]
 
 
-def test_analysis_has_produced_by_edge() -> None:
-    structured = SimpleNamespace(
-        question="Q?", dataset_paths=[], summary="", findings=[], hypotheses_tested=[],
-        charts=[], status="completed", task_id="t", context_id="c", derived_from=[],
-    )
-    [edge] = _produced_by(_edges("data_voyager", structured))
-    assert edge["source"] == "analysis:Q?"
-    assert edge["target"] == "subagent:data_voyager"
-    assert edge["target_kind"] == "subagent"
-    assert edge["target_label"] == "DataVoyager"
-
-
 def test_each_subagent_stamps_its_producer() -> None:
     hyp = SimpleNamespace(question="H?", theories=[])
     assert _produced_by(_edges("hypothesis_generator", hyp))[0]["target"] == "subagent:hypothesis_generator"
@@ -232,43 +198,25 @@ def test_declared_ref_node_id_matches_convention() -> None:
     assert declared_ref_node_id("hypothesis", q) == artifact_node_id("hypothesis", {"question": q})
     assert declared_ref_node_id("dataset", "./d.csv") == "dataset:./d.csv"
     assert declared_ref_node_id("paper", "Smith 2020") == paper_node_id({"citation": "Smith 2020"})
-    assert declared_ref_node_id("analysis", "A?") == "analysis:A?"
-
-
-def test_analysis_declares_tested_theory() -> None:
-    structured = SimpleNamespace(
-        question="Does R-gene predict resistance?", dataset_paths=[], summary="",
-        findings=[], hypotheses_tested=[], charts=[], status="completed",
-        task_id="t", context_id="c",
-        derived_from=[DerivedRef(kind="hypothesis", ref="Why does resistance vary?", relation="tests")],
-    )
-    edges = _edges("data_voyager", structured)
-    tests = [e for e in edges if e["relation"] == "tests"]
-    assert len(tests) == 1
-    assert tests[0]["source"] == "analysis:Does R-gene predict resistance?"
-    # Resolves to the exact hypothesis node id so the graph joins them.
-    assert tests[0]["target"] == "hypothesis:Why does resistance vary?"
-    assert tests[0]["target_kind"] == "hypothesis"
 
 
 def test_report_declares_synthesized_inputs() -> None:
     structured = SimpleNamespace(
         title="Blight synthesis", markdown="# r",
         derived_from=[
-            DerivedRef(kind="analysis", ref="Does R-gene predict resistance?", relation="synthesizes"),
+            DerivedRef(kind="hypothesis", ref="Does R-gene predict resistance?", relation="synthesizes"),
             DerivedRef(kind="paper", ref="Smith 2020", relation="synthesizes"),
         ],
     )
     edges = {(e["relation"], e["target"]) for e in _edges("report_writer", structured)}
-    assert ("synthesizes", "analysis:Does R-gene predict resistance?") in edges
+    assert ("synthesizes", "hypothesis:Does R-gene predict resistance?") in edges
     assert ("synthesizes", "source:Smith 2020") in edges  # paper -> source namespace
 
 
 def test_declared_ref_with_empty_fields_is_skipped() -> None:
     structured = SimpleNamespace(
-        question="Q?", dataset_paths=[], summary="", findings=[], hypotheses_tested=[],
-        charts=[], status="completed", task_id="t", context_id="c",
+        title="R", markdown="# r",
         derived_from=[DerivedRef(kind="", ref="x"), DerivedRef(kind="hypothesis", ref="")],
     )
-    declared = [e for e in _edges("data_voyager", structured) if e["relation"] not in ("analyzes", "produced_by")]
+    declared = [e for e in _edges("report_writer", structured) if e["relation"] != "produced_by"]
     assert declared == []

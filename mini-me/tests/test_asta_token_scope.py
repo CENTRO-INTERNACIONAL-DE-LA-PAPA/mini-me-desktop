@@ -1,6 +1,6 @@
 """Tests for shared Asta-token resolution (`backend.runtime`).
 
-Regression guard for the field bug where the theorizer/DataVoyager status polls
+Regression guard for the field bug where the theorizer's status polls
 ran outside ``agent()`` and therefore authenticated the sandbox `asta` CLI with
 the stale process-wide ``ASTA_TOKEN`` env var — so a completed run polled as
 "running" forever even after the user refreshed their token. ``resolve_asta_token``

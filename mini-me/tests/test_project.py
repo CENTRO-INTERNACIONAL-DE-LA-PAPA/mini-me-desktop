@@ -49,8 +49,6 @@ def _ai(text: str) -> dict:
 
 IMG = {"name": "eda.png", "path": "./eda.png", "media_type": "image/png"}
 CSV = {"name": "data.csv", "path": "./data.csv", "media_type": "text/csv"}
-DV_DONE = {"question": "What drives yield?", "status": "completed"}
-DV_RUNNING = {"question": "What drives yield?", "status": "running"}
 
 
 # ---------------------------------------------------------------------------
@@ -114,17 +112,6 @@ def test_uploaded_csv_is_not_counted_as_analysis() -> None:
 # Advisory suggestions
 # ---------------------------------------------------------------------------
 
-def test_theories_without_data_test_suggests_datavoyager() -> None:
-    suggestions = derive_suggestions({"hypotheses": [_hyp(2)]})
-    titles = [s.title for s in suggestions]
-    assert "Test your theories against data" in titles
-    # P2: the "test against data" nudge now routes to DataVoyager (the real
-    # theory→data loop), not Diagnostic Analytics as a proxy.
-    dv = next(s for s in suggestions if s.title == "Test your theories against data")
-    assert dv.action == "DataVoyager"
-    assert "data_voyager" in dv.prompt
-
-
 def test_every_suggestion_carries_a_routable_prompt() -> None:
     # P3.2: each suggestion ships a ready-to-send prompt that names the
     # subagent (matches the composer's "Use the <name> subagent to ..." routing)
@@ -156,36 +143,10 @@ def test_datasets_without_analysis_suggests_eda() -> None:
     assert any(s.action == "Exploratory Data Analysis" for s in suggestions)
 
 
-def test_theories_with_visualizations_does_not_suggest_data_test() -> None:
-    # If analysis (an image) already ran, drop the "test against data" nudge.
-    suggestions = derive_suggestions({"hypotheses": [_hyp(1)], "files": [IMG]})
-    assert all(s.title != "Test your theories against data" for s in suggestions)
-
-
-def test_completed_analysis_clears_test_against_data_nudge() -> None:
-    # A completed DataVoyager run is a first-class "analysis ran" signal even
-    # without an image file, so it clears the "test theories against data" nudge.
-    suggestions = derive_suggestions({"hypotheses": [_hyp(1)], "analyses": [DV_DONE]})
-    assert all(s.title != "Test your theories against data" for s in suggestions)
-
-
-def test_running_analysis_does_not_clear_the_nudge() -> None:
-    # A still-running run has produced no evidence yet, so the nudge stays.
-    suggestions = derive_suggestions({"hypotheses": [_hyp(1)], "analyses": [DV_RUNNING]})
-    assert any(s.title == "Test your theories against data" for s in suggestions)
-
-
-def test_summarize_completed_counts_completed_analyses() -> None:
-    completed = summarize_completed({"analyses": [DV_DONE]})
-    assert "1 DataVoyager run" in completed["analysis"]
-    # A still-running run is not counted as completed work.
-    assert "analysis" not in summarize_completed({"analyses": [DV_RUNNING]})
-
-
 def test_suggestions_capped_at_three() -> None:
     # An artifact set that trips many rules still yields at most 3.
     artifacts = {
-        "hypotheses": [_hyp(1)],  # theories → data test + pull full text
+        "hypotheses": [_hyp(1)],  # theories → pull full text
         "reports": [{"title": "r", "markdown": "x"}],  # report + no sources
         "datasets": [{"title": "d"}],  # dataset + no analysis
     }

@@ -63,8 +63,8 @@ def test_a_host_with_no_tools_is_not_reported_as_available(monkeypatch) -> None:
         mcp_tools, "_get_or_create_mcp_client", lambda _names, _auth=None: EmptyAdapter()
     )
 
-    assert _run(mcp_tools.get_mcp_tools(("asta",))) == []
-    assert _mcp_statuses["asta"] is False
+    assert _run(mcp_tools.get_mcp_tools(("agrovoc",))) == []
+    assert _mcp_statuses["agrovoc"] is False
 
 
 def test_paired_cleaning_services_fail_independently(monkeypatch) -> None:
@@ -256,12 +256,18 @@ def test_dataverse_is_only_named_unavailable_when_it_is():
             for server_id, status in states.items()
         ]
 
-    asta_down = availability_note(services(asta="unavailable", dataverse="available"))
-    assert "Asta" in asta_down
-    assert "Dataverse" not in asta_down
-    assert "dataverse_explorer" not in asta_down
+    agrovoc_down = availability_note(services(agrovoc="unavailable", dataverse="available"))
+    assert "AGROVOC" in agrovoc_down
+    assert "Dataverse" not in agrovoc_down
+    assert "dataverse_explorer" not in agrovoc_down
 
-    dataverse_down = availability_note(services(asta="available", dataverse="unavailable"))
+    dataverse_down = availability_note(services(agrovoc="available", dataverse="unavailable"))
     assert "dataverse_explorer is unavailable" in dataverse_down
 
-    assert availability_note(services(asta="available", dataverse="checking")) == ""
+    assert availability_note(services(agrovoc="available", dataverse="checking")) == ""
+
+
+def test_asta_is_not_an_mcp_server():
+    """Asta is the CLI alone; a hosted Asta MCP would put "Unavailable: Asta" in every prompt."""
+    assert "asta" not in mcp_tools.MCP_SERVER_CONFIGS
+    assert all(row["id"] != "asta" for row in mcp_tools.mcp_status_report()["services"])

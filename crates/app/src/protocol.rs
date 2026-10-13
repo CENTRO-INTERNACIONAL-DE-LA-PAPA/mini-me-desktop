@@ -420,8 +420,8 @@ pub struct Report {
 
 /// A long-running Asta job that outlived the turn that started it.
 ///
-/// The theorizer (5–15 min) and DataVoyager (20–40 min) submit with `--no-wait` and return
-/// a `task_id` immediately, so a chat turn is never blocked on them. The **client** is
+/// The theorizer (5–15 min) submits with `--no-wait` and returns a `task_id`
+/// immediately, so a chat turn is never blocked on it. The **client** is
 /// then responsible for polling — and this client never did, which was not merely a
 /// missing panel: `persist_theory_outputs` and `persist_analysis_outputs` are called from
 /// the poll route and **nowhere else** (`backend/routes/artifacts.py:202,243`), so a
@@ -434,14 +434,11 @@ pub struct Job {
     /// The question the job was started for — its label, and a query parameter the
     /// theorizer route uses when persisting results.
     pub question: String,
-    /// DataVoyager only; passed back as `ctx`.
-    pub context_id: Option<String>,
     /// Status as of the last snapshot or poll.
     pub status: String,
     /// How much work was bought, when the job has a size a researcher chose.
     ///
-    /// Discovery only, and `None` everywhere else: the theorizer and DataVoyager run for as long
-    /// as they run. It exists so the estimate can scale with the budget rather than quoting the
+    /// Discovery only, and `None` everywhere else: the theorizer runs for as long as it runs. It exists so the estimate can scale with the budget rather than quoting the
     /// default at everybody (§266 deferred this; it is here now).
     pub size: Option<u64>,
 }
@@ -449,7 +446,6 @@ pub struct Job {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobKind {
     Theorizer,
-    Analysis,
     /// An Asta AutoDiscovery run: an MCTS search that writes and tests its own hypotheses.
     Discovery,
 }
@@ -458,7 +454,6 @@ impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
             JobKind::Theorizer => "Theorizer",
-            JobKind::Analysis => "Data analysis",
             JobKind::Discovery => "Discovery",
         }
     }
@@ -467,7 +462,7 @@ impl JobKind {
     /// leaving someone watching a spinner wondering if it is stuck.
     /// Roughly how long this kind of job takes, given how much of it was bought.
     ///
-    /// **Discovery scales; the other two do not.** A five-experiment run finishing in thirteen
+    /// **Discovery scales; the theorizer does not.** A five-experiment run finishing in thirteen
     /// minutes was being labelled "25–40 min" because the estimate quoted the default budget at
     /// everyone — and an estimate that is wrong by three times is one a researcher stops reading.
     ///
@@ -479,7 +474,6 @@ impl JobKind {
     pub fn expected(self, size: Option<u64>) -> String {
         match self {
             JobKind::Theorizer => "5–15 min".to_string(),
-            JobKind::Analysis => "20–40 min".to_string(),
             JobKind::Discovery => match size {
                 Some(n) => format!("{}–{} min", 5 + n, 5 + 2 * n),
                 // Unconfigured, so the default budget is the honest guess.
@@ -513,11 +507,6 @@ impl Job {
                 "/theorizer/{}/{task}?q={}",
                 urlencode(thread_id),
                 urlencode(&self.question)
-            ),
-            JobKind::Analysis => format!(
-                "/analyze-data/{}/{task}?ctx={}",
-                urlencode(thread_id),
-                urlencode(self.context_id.as_deref().unwrap_or_default())
             ),
             // No query string: the run id is the whole identity, and the route reads the run's
             // metadata back from the service rather than being told it. Which matters for a run
@@ -1107,14 +1096,13 @@ pub struct Bucket {
 /// `datasets, sources, reports, files, hypotheses, libraries, analyses, edges,
 /// project`. `edges` is graph wiring rather than a user-facing output, and
 /// `project` is the spine, so neither is listed here.
-const ARTIFACT_BUCKETS: [&str; 8] = [
+const ARTIFACT_BUCKETS: [&str; 7] = [
     "datasets",
     "sources",
     "reports",
     "files",
     "hypotheses",
     "libraries",
-    "analyses",
     // Added with AutoDiscovery. It earns a bucket for the case the others do not have: a *failed*
     // draft is neither a `Draft` (nothing to approve) nor a `Job` (nothing to poll), so without a
     // bucket it existed in the artifact bundle and nowhere on screen — which is how §249's
@@ -3364,10 +3352,9 @@ fn decode_drafts(artifacts: &Value) -> Vec<Draft> {
 
 /// Pull the still-running long jobs out of a `values` payload.
 ///
-/// Fields come from `HypothesisArtifactPayload` / `DataAnalysisArtifactPayload` /
-/// `DiscoveryRunArtifactPayload` (`backend/schemas.py`): all carry `status`, the first two carry
-/// `task_id`, the analysis one adds `context_id`, and the discovery one calls its id `run_id` — so
-/// the key is per bucket rather than assumed. A job with no id cannot be polled, so it is skipped
+/// Fields come from `HypothesisArtifactPayload` / `DiscoveryRunArtifactPayload`
+/// (`backend/schemas.py`): both carry `status`, the first carries `task_id`, and the discovery one
+/// calls its id `run_id` — so the key is per bucket rather than assumed. A job with no id cannot be polled, so it is skipped
 /// rather than shown as something the user could wait on.
 ///
 /// A discovery run still `awaiting_approval` is deliberately **not** a job here — see [`Draft`].
@@ -3375,7 +3362,6 @@ fn decode_jobs(artifacts: &Value) -> Vec<Job> {
     let mut jobs = Vec::new();
     for (bucket, kind, id_key) in [
         ("hypotheses", JobKind::Theorizer, "task_id"),
-        ("analyses", JobKind::Analysis, "task_id"),
         ("discoveries", JobKind::Discovery, "run_id"),
     ] {
         let Some(items) = artifacts.get(bucket).and_then(Value::as_array) else {
@@ -3411,10 +3397,6 @@ fn decode_jobs(artifacts: &Value) -> Vec<Job> {
                     .unwrap_or_default()
                     .trim()
                     .to_string(),
-                context_id: item
-                    .get("context_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
                 status,
                 // Only the discoveries bucket carries one, and only when the run was configured.
                 size: item.get("n_experiments").and_then(Value::as_u64).filter(|n| *n > 0),
@@ -3460,7 +3442,6 @@ const MAX_LABEL_CHARS: usize = 96;
 /// | files       | `name`     |
 /// | hypotheses  | `question` |
 /// | libraries   | `summary`  |
-/// | analyses    | `question` |
 ///
 /// An unrecognised artifact is still *counted* rather than dropped — an empty panel
 /// would misrepresent work that actually happened.
@@ -4593,7 +4574,7 @@ mod tests {
 
     #[test]
     fn a_stored_thread_still_carries_the_task_ids_of_running_work() {
-        // The observation this rests on: a theorizer or DataVoyager run lives on Asta's own
+        // The observation this rests on: a theorizer run lives on Asta's own
         // hosted service, keyed by a task id. Closing the window never stopped the work — it
         // stopped our watching of it, and the poll is also what persists the result. So the ids
         // have to survive a reopen, and they do: `GET /threads/{id}/state` returns `values`
@@ -4612,9 +4593,9 @@ mod tests {
                         {"question": "an older one", "task_id": "task-done",
                          "status": "completed"},
                     ],
-                    "analyses": [
-                        {"question": "yield vs rainfall", "task_id": "voyager-1",
-                         "status": "running", "context_id": "ctx-9"},
+                    "discoveries": [
+                        {"name": "yield vs rainfall", "run_id": "discovery-1",
+                         "status": "running"},
                     ],
                 }
             })
@@ -4627,7 +4608,7 @@ mod tests {
             .iter()
             .map(|job| job.task_id.as_str())
             .collect();
-        assert_eq!(ids, ["task-still-going", "task-done", "voyager-1"]);
+        assert_eq!(ids, ["task-still-going", "task-done", "discovery-1"]);
 
         // Finished ones come back too — the Jobs panel should show what a conversation did, not
         // only what it is still doing. `track_job` is what declines to poll them.
@@ -4637,7 +4618,7 @@ mod tests {
             .filter(|job| !job.is_finished())
             .map(|job| job.task_id.as_str())
             .collect();
-        assert_eq!(running, ["task-still-going", "voyager-1"]);
+        assert_eq!(running, ["task-still-going", "discovery-1"]);
 
         // The question rides along, because the theorizer's poll route needs it in the query
         // string to persist the outcome under the right heading.
@@ -4922,7 +4903,7 @@ mod tests {
 
     #[test]
     fn a_running_long_job_is_found_and_pollable() {
-        // Field names from HypothesisArtifactPayload / DataAnalysisArtifactPayload
+        // Field names from HypothesisArtifactPayload / DiscoveryRunArtifactPayload
         // (backend/schemas.py:353,388). Getting these wrong means the app silently never
         // collects a 40-minute run — which is what it did before this existed.
         let snapshot = decode_values(
@@ -4933,11 +4914,10 @@ mod tests {
                         "status": "running",
                         "task_id": "1f0a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"
                     }],
-                    "analyses": [{
-                        "question": "What drives yield?",
+                    "discoveries": [{
+                        "name": "What drives yield?",
                         "status": "running",
-                        "task_id": "aaaabbbb-cccc-dddd-eeee-ffff00001111",
-                        "context_id": "ctx-42"
+                        "run_id": "aaaabbbb-cccc-dddd-eeee-ffff00001111"
                     }]
                 }
             })
@@ -4963,12 +4943,11 @@ mod tests {
             "a raw space would break the request: {route}"
         );
 
-        let analysis = &snapshot.jobs[1];
-        assert_eq!(analysis.kind, JobKind::Analysis);
-        assert!(
-            analysis.route("t").contains("ctx=ctx-42"),
-            "{}",
-            analysis.route("t")
+        let discovery = &snapshot.jobs[1];
+        assert_eq!(discovery.kind, JobKind::Discovery);
+        assert_eq!(
+            discovery.route("t"),
+            "/discovery/t/aaaabbbb-cccc-dddd-eeee-ffff00001111"
         );
     }
 
@@ -5002,7 +4981,6 @@ mod tests {
                 kind: JobKind::Theorizer,
                 task_id: "x".into(),
                 question: String::new(),
-                context_id: None,
                 status: status.to_string(),
                 size: None,
             };
@@ -5011,10 +4989,9 @@ mod tests {
         }
         for status in ["running", "input-required", "submitted"] {
             let job = Job {
-                kind: JobKind::Analysis,
+                kind: JobKind::Discovery,
                 task_id: "x".into(),
                 question: String::new(),
-                context_id: None,
                 status: status.to_string(),
                 size: None,
             };
@@ -5034,7 +5011,6 @@ mod tests {
                 "files": [{"name": "eda.png"}],
                 "hypotheses": [{"statement": "no label field here"}],
                 "libraries": [],
-                "analyses": [],
                 "edges": [{"from": "a", "to": "b"}],
                 "project": {"mission": "M", "completed": ["c"], "pending": [], "suggestions": []}
             }
@@ -5853,10 +5829,9 @@ mod tests {
     #[test]
     fn an_unfinished_run_is_collected_from_whichever_thread_owns_it() {
         let running = Job {
-            kind: JobKind::Analysis,
+            kind: JobKind::Discovery,
             task_id: "4c290c71-be43-421a-8273-2f98dcc7b331".into(),
             question: "SOC modelling".into(),
-            context_id: Some("eb663608-04c1-4140-a673-ac8dc98a2507".into()),
             status: "working".into(),
             size: None,
         };
@@ -5942,7 +5917,6 @@ mod tests {
             kind: JobKind::Discovery,
             task_id: "8e5d2eaa-f067-4193-9400-d555e4607c41".into(),
             question: "SOC covariates".into(),
-            context_id: None,
             status: "running".into(),
             size: None,
         };
@@ -5967,9 +5941,8 @@ mod tests {
         assert_eq!(job.kind.expected(Some(50)), "55–105 min");
         // Unconfigured falls back to the default budget rather than to nothing.
         assert_eq!(job.kind.expected(None), "20–35 min");
-        // The other two do not scale: they run for as long as they run.
+        // The theorizer does not scale: it runs for as long as it runs.
         assert_eq!(JobKind::Theorizer.expected(Some(5)), JobKind::Theorizer.expected(None));
-        assert_eq!(JobKind::Analysis.expected(Some(500)), "20–40 min");
     }
 
     /// The estimate is only useful if the budget actually reaches it.
@@ -6135,28 +6108,6 @@ mod tests {
             ],
         ),
         (
-            "analyses",
-            &["task_id", "status", "question", "context_id"],
-            &[
-                (
-                    "dataset_paths",
-                    "the claims recorder checks these against disk (claims.py); the panel shows \
-                     the folder rather than the claim",
-                ),
-                ("summary", "prose for the answer, not a field of any row"),
-                (
-                    "findings",
-                    "each finding names a chart, and §42 established figures are found on disk \
-                     rather than trusted from a list",
-                ),
-                ("hypotheses_tested", "prose for the answer"),
-                (
-                    "charts",
-                    "same as `findings[].chart_path` — the gallery walks the folder",
-                ),
-            ],
-        ),
-        (
             "discoveries",
             &["run_id", "status", "name", "intent", "n_experiments", "dataset_paths"],
             &[
@@ -6257,7 +6208,7 @@ mod tests {
         assert_eq!(documents[0].path, "./contract-libraries-papers-0-path.txt");
         assert_eq!(documents[0].title, "contract-libraries-papers-0-title");
 
-        // hypotheses + analyses + discoveries → jobs, one per bucket that carries an id.
+        // hypotheses + discoveries → jobs, one per bucket that carries an id.
         let jobs = decode_jobs(artifacts);
         let of = |kind: JobKind| {
             jobs.iter()
@@ -6266,12 +6217,6 @@ mod tests {
         };
         assert_eq!(of(JobKind::Theorizer).task_id, "contract-hypotheses-task_id");
         assert_eq!(of(JobKind::Theorizer).question, "contract-hypotheses-question");
-        assert_eq!(of(JobKind::Analysis).task_id, "contract-analyses-task_id");
-        assert_eq!(of(JobKind::Analysis).question, "contract-analyses-question");
-        assert_eq!(
-            of(JobKind::Analysis).context_id.as_deref(),
-            Some("contract-analyses-context_id")
-        );
         assert_eq!(of(JobKind::Discovery).task_id, "contract-discoveries-run_id");
         assert_eq!(of(JobKind::Discovery).question, "contract-discoveries-name");
 
@@ -6285,7 +6230,6 @@ mod tests {
             ("files", "contract-files-name"),
             ("hypotheses", "contract-hypotheses-question"),
             ("libraries", "contract-libraries-summary"),
-            ("analyses", "contract-analyses-question"),
             ("discoveries", "contract-discoveries-name"),
         ] {
             let row = snapshot

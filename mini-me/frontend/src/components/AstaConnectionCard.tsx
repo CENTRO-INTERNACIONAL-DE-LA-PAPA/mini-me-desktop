@@ -15,10 +15,10 @@ import {
 const EMPTY: AstaStatus = { connected: false, expires_at: null, expired: false, seconds_left: null };
 
 // Self-service Asta token refresh. The token authenticates the `asta` CLI in the
-// sandbox (theorizer, DataVoyager, PDF tools) and expires ~weekly; pasting a
-// fresh one here updates it in seconds, no redeploy. Mirrors the two storage
-// modes of the API-key manager: "vault" persists server-side, "client" keeps it
-// in this browser and passes it on each run.
+// sandbox (theorizer, PDF tools) and expires ~weekly; pasting a fresh one here
+// updates it in seconds, no redeploy. Mirrors the two storage modes of the
+// API-key manager: "vault" persists server-side, "client" keeps it in this
+// browser and passes it on each run.
 export function AstaConnectionCard({ storageMode }: { storageMode: StorageMode }) {
   const [status, setStatus] = useState<AstaStatus>(EMPTY);
   const [draft, setDraft] = useState("");
@@ -111,7 +111,7 @@ export function AstaConnectionCard({ storageMode }: { storageMode: StorageMode }
       </div>
 
       <p className="asta-conn-help">
-        Authenticates the theorizer, DataVoyager, and PDF tools. Tokens expire — when
+        Authenticates the theorizer and PDF tools. Tokens expire — when
         they do, get a fresh one in a terminal with{" "}
         <code>asta auth login</code> then <code>asta auth print-token</code>, and paste it below.
       </p>

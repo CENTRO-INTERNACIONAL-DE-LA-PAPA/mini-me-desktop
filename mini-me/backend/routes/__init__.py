@@ -11,7 +11,6 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 
 from backend.routes.artifacts import (
-    analyze_data_status,
     collect_outside_files,
     delete_sandbox,
     get_artifact_file,
@@ -81,11 +80,6 @@ app = Starlette(
             "/discovery/{thread_id}/{run_id}/experiments/{experiment_id}/figures",
             endpoint=discovery_figures,
             methods=["POST"],
-        ),
-        Route(
-            "/analyze-data/{thread_id}/{task_id}",
-            endpoint=analyze_data_status,
-            methods=["GET"],
         ),
         Route("/config", endpoint=get_config, methods=["GET"]),
         Route("/config", endpoint=save_config, methods=["PUT"]),

@@ -23,6 +23,10 @@ Under **GET MORE** you can browse and **install** extra themes.
 
 This page controls **which AI** answers your questions, and its keys.
 
+A new installation starts with **Gemini 3.7 Flash through OpenRouter** (Provider *Custom*,
+model `google/gemini-3.7-flash`, Base URL `https://openrouter.ai/api/v1`), so it only needs an
+OpenRouter key.
+
 - **Provider** — the AI company: Anthropic, OpenAI, Google, Mistral, or *Custom
   (OpenAI-compatible)*.
 - **Model** — which of that company's models to use. Pick one from the list, or type its name
@@ -38,6 +42,22 @@ This page controls **which AI** answers your questions, and its keys.
 
 ![Adding an API key](images/settings-keys.png)
 
+### Is this model compatible? {#model-check}
+
+When you pick a model (for Mini-Me as a whole or for one specialist), Mini-Me sends it one tiny
+test request and shows the result under it. **Check model** runs the test again.
+
+- **✓ Works with every specialist** — nothing to do.
+- **⚠ Works, but some specialists may fail** — the model can use tools, but refuses to be told
+  to use a specific one. Some specialists need that (for example Academic Research), so they may
+  fail with this model. The message suggests models that work fully.
+- **✗ Can't be used with Mini-Me** — the model can't use tools at all. Choose another one.
+- **Couldn't check this model** — for example, no key is saved yet or there is no connection.
+  Nothing is blocked; the model can still be saved.
+
+The test costs a few tokens, far less than a cent, and its result is remembered, so it doesn't
+run every time you open Settings.
+
 ::: {.callout-note}
 Keys are stored in **Windows Credential Manager**, never in a normal file, and are never shown
 again after you save them. Using a company's model is **billed to that company's account** —
@@ -46,7 +66,7 @@ the one the key belongs to.
 
 ## Research
 
-Here you can paste an **Asta token** and an **Asta API key** by hand. Most people don't need
+Here you can paste an **Asta token** by hand. Most people don't need
 this: signing in to Asta during setup is enough.
 
 ## Backend

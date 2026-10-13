@@ -164,7 +164,6 @@ def summarize_completed(artifacts: dict[str, Any]) -> dict[str, str]:
     files = artifacts.get("files") or []
     hypotheses = artifacts.get("hypotheses") or []
     libraries = artifacts.get("libraries") or []
-    analyses = artifacts.get("analyses") or []
 
     completed: dict[str, str] = {}
 
@@ -196,12 +195,6 @@ def summarize_completed(artifacts: dict[str, Any]) -> dict[str, str]:
             f"Produced {len(image_files)} visualization"
             f"{'' if len(image_files) == 1 else 's'} from the data."
         )
-    completed_analyses = [a for a in analyses if (a or {}).get("status") == "completed"]
-    if completed_analyses:
-        completed["analysis"] = (
-            f"Tested hypotheses against the data in {len(completed_analyses)} "
-            f"DataVoyager run{'' if len(completed_analyses) == 1 else 's'}."
-        )
     if reports:
         title = (reports[-1] or {}).get("title") or "a report"
         completed["report"] = f"Wrote report: “{title}”."
@@ -221,39 +214,16 @@ def derive_suggestions(artifacts: dict[str, Any]) -> list[ProjectSuggestion]:
     files = artifacts.get("files") or []
     hypotheses = artifacts.get("hypotheses") or []
     libraries = artifacts.get("libraries") or []
-    analyses = artifacts.get("analyses") or []
 
     has_sources = bool(sources)
     has_datasets = bool(datasets)
     has_report = bool(reports)
     has_theories = _theory_count(hypotheses) > 0
     has_library = _library_indexed(libraries) > 0
-    # A completed DataVoyager run is the strongest "analysis ran" signal; its
-    # charts also land as image files, but the artifact itself is authoritative.
-    has_analysis = _has_visualizations(files) or any(
-        (a or {}).get("status") == "completed" for a in analyses
-    )
+    has_analysis = _has_visualizations(files)
 
     suggestions: list[ProjectSuggestion] = []
 
-    if has_theories and not has_analysis:
-        suggestions.append(
-            ProjectSuggestion(
-                title="Test your theories against data",
-                rationale=(
-                    "You have literature-grounded theories but no analysis has "
-                    "been run against a dataset yet. DataVoyager can generate and "
-                    "test them against your data, closing the loop from theory to "
-                    "evidence."
-                ),
-                action="DataVoyager",
-                prompt=(
-                    "Use the data_voyager subagent to test the theories generated "
-                    "so far against my dataset and report which ones the evidence "
-                    "supports."
-                ),
-            )
-        )
     if has_report and not has_sources:
         suggestions.append(
             ProjectSuggestion(

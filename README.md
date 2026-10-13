@@ -42,7 +42,7 @@ the resulting evidence and files came from.
 
 ## The specialist team
 
-The live backend currently defines twelve specialists. The desktop reads their names and
+The live backend currently defines eleven specialists. The desktop reads their names and
 descriptions from the backend registry instead of maintaining a separate hardcoded UI list.
 
 | Specialist | Responsibility |
@@ -55,7 +55,6 @@ descriptions from the backend registry instead of maintaining a separate hardcod
 | `exploratory_data_analysis` | Profiles and summarizes data, examines missingness and outliers, and creates explanatory visualizations. |
 | `diagnostic_analytics` | Investigates why an outcome occurred using comparisons, regression, inference, confounder checks, and causal framing. |
 | `predictive_analytics` | Selects, trains, validates, and compares machine-learning, forecasting, deep-learning, and Bayesian models. |
-| `data_voyager` | Uses Asta DataVoyager to test a specific analytical question against local tabular data and return findings and charts. |
 | `hypothesis_generator` | Uses the Asta Theorizer pipeline to generate literature-grounded mechanisms, theories, and open questions. |
 | `autodiscovery` | Drafts an open-ended Asta exploration that generates and tests hypotheses over a dataset. The researcher approves its experiment budget before it runs. |
 | `report_writer` | Synthesizes findings, methods, limitations, recommendations, and references into a complete report. |
@@ -202,7 +201,6 @@ exposed through those MCP tools:
 - `asta pdf-extraction remote` for PDF text and OCR.
 - `asta documents` for the local semantic PDF library.
 - `asta generate-theories` for the Theorizer pipeline.
-- `asta analyze-data` for DataVoyager.
 - `asta autodiscovery` for credit-metered open-ended experiments.
 
 ## External services
@@ -210,7 +208,7 @@ exposed through those MCP tools:
 | Service | Why it is used | When data leaves the machine |
 |---|---|---|
 | **LLM providers** | Reasoning and language generation. OpenAI, Anthropic, Google, Mistral, and custom OpenAI-compatible gateways are supported. | When a conversation or specialist run is submitted. The user supplies the provider credentials. |
-| **Asta / Allen Institute for AI** | Literature tools, Semantic Scholar records, PDF OCR, document embeddings, theory generation, DataVoyager, and AutoDiscovery. | Only when an Asta-backed specialist or command is used. Some operations consume Asta credits and require approval. |
+| **Asta / Allen Institute for AI** | Literature tools, Semantic Scholar records, PDF OCR, document embeddings, theory generation, and AutoDiscovery. | Only when an Asta-backed specialist or command is used. Some operations consume Asta credits and require approval. |
 | **CIP Dataverse (via local MCP)** | The local server searches CIP's dataset catalogue and retrieves dataset/file metadata over the network. | When the Dataverse Explorer runs. |
 | **AGROVOC and Crop Ontology MCPs** | Resolve and normalize agricultural and crop terminology. | When the Data Cleaner requests ontology assistance. |
 | **Semantic Scholar and arXiv** | Stable paper records and open-access PDF locations. These are normally reached through Asta; the PDF Librarian can download an identified open-access PDF URL. | When literature is resolved or an open-access paper is explicitly fetched. Paywalled material is not bypassed. |
@@ -297,14 +295,13 @@ Specialists return typed artifacts rather than requiring another system to scrap
 - `DataVerseSearchResults` for dataset recommendations.
 - `LibraryArtifact` for PDF extraction, indexing, and semantic search.
 - `HypothesisOutput` for theories and evidence.
-- `DataAnalysisResults` for DataVoyager findings and figures.
 - `DiscoveryRunResults` for AutoDiscovery lifecycle and experiments.
 - `ReportWriterOutput` for complete report content.
 - `ResearchPlan` for ordered, reviewable investigation steps.
 
 Custom backend routes cover file upload/download, PDF report rendering, project management,
 provider configuration, Asta authentication, sandbox lifecycle, stray-output collection, and
-status/approval flows for Theorizer, DataVoyager, and AutoDiscovery. This makes it possible for an
+status/approval flows for Theorizer and AutoDiscovery. This makes it possible for an
 AI-CoScientist interface to reuse the agent backend without reproducing the desktop UI, provided
 it preserves thread identity, structured artifacts, interrupts, credential isolation, and the
 human credit-approval gate.

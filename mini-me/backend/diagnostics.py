@@ -16,8 +16,8 @@ nothing to say.
 # Where it came from
 
 *"I launch it now so I must assume I should wait"* — followed by a grep that found one line. A
-DataVoyager submission logged nothing on success: `datavoyager_tools` had four `logger.warning` calls
-and every one of them was a failure path. So a run that submitted correctly and a run that never
+DataVoyager submission (that specialist has since been removed) logged nothing on success:
+`datavoyager_tools` had four `logger.warning` calls and every one of them was a failure path. So a run that submitted correctly and a run that never
 submitted produced identical output, and the only way to tell them apart was to watch the panel
 (docs §235).
 

@@ -1,38 +1,5 @@
 {
   "artifacts": {
-    "analyses": [
-      {
-        "charts": [
-          "contract-analyses-charts-0",
-          "contract-analyses-charts-1"
-        ],
-        "context_id": "contract-analyses-context_id",
-        "dataset_paths": [
-          "contract-analyses-dataset_paths-0",
-          "contract-analyses-dataset_paths-1"
-        ],
-        "findings": [
-          {
-            "chart_path": "./contract-analyses-findings-0-chart_path.txt",
-            "detail": "contract-analyses-findings-0-detail",
-            "title": "contract-analyses-findings-0-title"
-          },
-          {
-            "chart_path": "./contract-analyses-findings-1-chart_path.txt",
-            "detail": "contract-analyses-findings-1-detail",
-            "title": "contract-analyses-findings-1-title"
-          }
-        ],
-        "hypotheses_tested": [
-          "contract-analyses-hypotheses_tested-0",
-          "contract-analyses-hypotheses_tested-1"
-        ],
-        "question": "contract-analyses-question",
-        "status": "contract-analyses-status",
-        "summary": "contract-analyses-summary",
-        "task_id": "contract-analyses-task_id"
-      }
-    ],
     "datasets": [
       {
         "authors": [

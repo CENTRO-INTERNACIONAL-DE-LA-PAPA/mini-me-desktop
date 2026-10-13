@@ -147,7 +147,7 @@ async def test_key(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 # Asta access token (per-user, paste-and-store — self-service token refresh).
 #
-# The token authenticates the `asta` CLI in the sandbox (theorizer, DataVoyager,
+# The token authenticates the `asta` CLI in the sandbox (theorizer, AutoDiscovery,
 # PDF extraction). It expires ~weekly; storing it per-user in Vault and editing
 # it here means an expired token is refreshed in seconds, without a redeploy.
 # These endpoints never return the token itself — only its connection + expiry.

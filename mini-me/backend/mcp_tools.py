@@ -1,7 +1,8 @@
 """MCP servers: connection config, caching, resilience, and loaders.
 
-Mini-Me reaches external knowledge through hosted MCP servers (AGROVOC, Crop
-Ontology, Asta) and the bundled CIP Dataverse stdio server. This module owns
+Mini-Me reaches external knowledge through hosted MCP servers (AGROVOC and Crop
+Ontology) and the bundled CIP Dataverse stdio server. Asta is reached through its CLI
+(`backend/paper_tools.py`), not through MCP. This module owns
 their connection configs, process-wide adapters whose FastMCP caches honor each server's discovery TTL,
 the truncation + save-to-sandbox logic that keeps large MCP payloads from
 poisoning agent state, and the ``get_*_mcp_tools`` loaders the subagents
@@ -48,12 +49,6 @@ MCP_SERVER_CONFIGS: dict[str, dict[str, Any]] = {
     "crop_ontology": {
         "url": "https://CropOntology.fastmcp.app/mcp",
     },
-    "asta": {
-        "url": "https://asta-tools.allen.ai/mcp/v1",
-        "headers_env": {
-            "x-api-key": "ASTA_API_KEY",
-        },
-    },
     "dataverse": {
         "transport": "stdio",
 
@@ -64,7 +59,6 @@ MCP_SERVER_CONFIGS: dict[str, dict[str, Any]] = {
 MCP_SERVER_LABELS = {
     "agrovoc": "AGROVOC",
     "crop_ontology": "Crop Ontology",
-    "asta": "Asta",
     "dataverse": "CIP Dataverse",
 }
 
@@ -222,10 +216,9 @@ def _make_mcp_error_handler(tool_name: str):
 MCP_TOOL_OUTPUT_MAX_BYTES = 128_000  # fallback for unknown MCPs
 
 # Per-MCP byte threshold above which results are saved to the sandbox instead
-# of passed directly to the model. Asta papers can be hundreds of KB; the
-# other MCPs return bounded structured data that rarely approaches these limits.
+# of passed directly to the model. These MCPs return bounded structured data that
+# rarely approaches these limits.
 MCP_SAVE_THRESHOLDS: dict[str, int] = {
-    "asta": 32_000,
     "dataverse": 512_000,
     "agrovoc": 512_000,
     "crop_ontology": 512_000,
@@ -630,10 +623,6 @@ async def get_data_cleaning_mcp_tools() -> list[Any]:
         *(get_mcp_tools((server_name,)) for server_name in ("agrovoc", "crop_ontology"))
     )
     return [tool for catalog in catalogs for tool in catalog]
-
-
-async def get_academic_research_mcp_tools() -> list[Any]:
-    return await get_mcp_tools(("asta",))
 
 
 async def get_dataverse_search_mcp_tools() -> list[Any]:

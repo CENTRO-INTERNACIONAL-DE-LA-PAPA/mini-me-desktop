@@ -28,10 +28,6 @@ from backend.autodiscovery_tools import (
     submit_run,
     update_metadata,
 )
-from backend.datavoyager_tools import (
-    persist_analysis_outputs,
-    poll_analysis_status,
-)
 from backend.theory_tools import (
     is_valid_task_id,
     persist_theory_outputs,
@@ -199,7 +195,7 @@ async def _poll_asta_job(
 ) -> Response:
     """Shared body of every "poll one Asta job in this thread's sandbox" route.
 
-    theorizer/analyze-data/discovery status each did the identical five steps —
+    theorizer/discovery status each did the identical five steps —
     validate the id, resolve the thread's sandbox, bind the user's Asta token,
     poll, best-effort persist on a terminal state — and only differed in which id
     param they read, which validator applies, and which poll/persist function to
@@ -264,29 +260,6 @@ async def theorizer_status(request: Request) -> Response:
         validate_id=is_valid_task_id,
         poll=poll_theory_status,
         persist=lambda adapter, task_id, result: persist_theory_outputs(
-            adapter, task_id, question, result
-        ),
-    )
-
-
-async def analyze_data_status(request: Request) -> Response:
-    """Poll an Asta DataVoyager task in the thread's sandbox and return its status.
-
-    The frontend calls this on an interval while a DataAnalysis artifact is
-    `running`, so the Analysis card fills in on its own when the run completes —
-    no chat turn, no coordinator. Uses the cheap ``asta analyze-data task <id>``
-    fetch, so it stays fast and survives sandbox restarts (the run lives on Asta's
-    hosted service). Returns ``completed``/``failed``/``input-required``/``running``,
-    or ``unavailable`` if the thread's sandbox is gone.
-    """
-    context_id = request.query_params.get("ctx", "")
-    question = request.query_params.get("q", "")
-    return await _poll_asta_job(
-        request,
-        id_param="task_id",
-        validate_id=is_valid_task_id,
-        poll=lambda adapter, task_id: poll_analysis_status(adapter, task_id, context_id),
-        persist=lambda adapter, task_id, result: persist_analysis_outputs(
             adapter, task_id, question, result
         ),
     )

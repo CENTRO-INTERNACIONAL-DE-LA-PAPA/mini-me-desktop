@@ -227,7 +227,7 @@ def test_run_reads_a_dict_shaped_response_too() -> None:
     """`LocalWorkspaceBackend.aexecute_untruncated` can answer with a dict, and `_run` read only
     attributes — so a dict-shaped response became "", indistinguishable from a command that
     printed nothing, and the poll reported "running" forever. §224, one module over
-    (`datavoyager_tools.py`/`autodiscovery_tools.py` already carry this fix)."""
+    (`autodiscovery_tools.py` already carries this fix)."""
     task = {"status": {"state": "completed"}, "artifacts": []}
 
     class _DictSandbox:

@@ -1,15 +1,14 @@
-//! The onboarding modal: a step-by-step replacement for the old flat Setup checklist.
+//! The Setup modal: one row per [`preflight::Check`], each with a single result.
 //!
-//! **One button, not one button per row.** The Setup pane made a first-time researcher find
-//! and click every failing check's fix in turn; this walks the same list of
-//! [`preflight::Check`]s automatically from a single "Get Started" press, stopping only where
-//! a person genuinely has to act (a sign-in, a manual step) — see
-//! [`Workbench::onboarding_advance`] in `main.rs` for the sequencer this renders.
+//! **Check, install, result.** Each row is checked once when Setup opens and shows either ✓ or
+//! the one button that fixes it. Pressing it shows progress in the row and ends in ✓, or in ✗
+//! with a plain reason and Retry. A successful fix is not followed by a re-check — see
+//! [`Workbench::start_fix`] — and its output is never shown; a failed one keeps its output
+//! behind "Show details".
 //!
-//! **Log in place, not log at the bottom.** The old pane kept one scrolling output box below
-//! the whole list, disconnected from whichever row it belonged to. Here the currently-running
-//! (or last-failed) step's log renders directly under its own row, and a step that has moved
-//! on collapses to a one-line verdict — see `Workbench::onboarding_history`.
+//! **Nothing can be pressed mid-install.** While a fix or a check is in flight
+//! ([`Workbench::setup_busy`]) every button that would move on or start something else is
+//! disabled, so Setup cannot be left half-done.
 #![allow(unused_imports)]
 
 use crate::*;
@@ -17,6 +16,18 @@ use crate::ui::{common::*, modals::*};
 use gpui::{
     div, prelude::*, px, rgb, ClipboardItem, Context, IntoElement, SharedString,
 };
+
+/// What a row is showing right now. Derived on every render from the report and the fix in
+/// flight, never stored, so it cannot drift from either.
+#[derive(Clone, Copy, PartialEq)]
+enum RowState {
+    InProgress,
+    Failed,
+    RestartRequired,
+    Done,
+    NeedsAction,
+    Skipped,
+}
 
 impl Workbench {
     /// The onboarding modal itself: frame, scrolling body, pinned actions and footer.
@@ -80,7 +91,7 @@ impl Workbench {
                         }))
                         .text_sm()
                         .child(if self.checking {
-                            "Re-checking…".to_string()
+                            "Checking…".to_string()
                         } else if report.ready() {
                             format!("Ready to run · {}", report.summary())
                         } else {
@@ -110,46 +121,64 @@ impl Workbench {
         pane
     }
 
-    /// One step: glyph, label, detail, and whatever belongs under it right now — the live
-    /// log if it is the active row, a collapsed verdict if it already finished and moved on,
-    /// a manual prompt if the sequence is waiting on the user, or nothing at all once
-    /// it has passed and been forgotten.
+    /// The fix in flight or last finished for this row, if any.
+    fn row_fix(&self, check_id: &str) -> Option<&RunningFix> {
+        self.running_fix.as_ref().filter(|fix| fix.check_id == check_id)
+    }
+
+    fn row_state(&self, check: &preflight::Check) -> RowState {
+        if let Some(fix) = self.row_fix(check.id) {
+            if !fix.done {
+                return RowState::InProgress;
+            }
+            if !fix.ok {
+                return RowState::Failed;
+            }
+        }
+        if check.id == "runtime" && self.restart_required {
+            return RowState::RestartRequired;
+        }
+        match check.state {
+            // A warning never blocks a turn (`Report::ready`), so it reads as done, with its
+            // detail saying what is missing.
+            preflight::State::Pass | preflight::State::Warn => RowState::Done,
+            preflight::State::Fail => RowState::NeedsAction,
+            preflight::State::Skip => RowState::Skipped,
+        }
+    }
+
+    /// One step: glyph, label, one line of detail, and the single action that applies now.
     fn onboarding_step_row(
         &self,
         check: &preflight::Check,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // A fix that reported success against *this* check, on a check that still isn't
-        // passing, is not a failure — it's `judge_finished_fix`'s "installed, but Windows
-        // needs a restart" case. Left as a plain `Fail` this drew a red ✗ with an "Install
-        // Ubuntu" button sitting right above a log that already explained the real state,
-        // which read as the app being confused about its own result.
-        let fix_succeeded = check.state != preflight::State::Pass
-            && self
-                .running_fix
-                .as_ref()
-                .is_some_and(|fix| fix.check_id == check.id && fix.done && fix.ok);
-        // Every step's row sits in this state while the automatic re-check runs, but only
-        // installing WSL itself needs a reboot (see `judge_finished_fix`). Any other step that
-        // still fails once the re-check is back is an ordinary failure, with its fix offered again.
-        let rechecking = fix_succeeded && self.checking;
-        let restart_needed = fix_succeeded && !self.checking && check.id == "runtime" && cfg!(windows);
-        let pending_restart = rechecking || restart_needed;
-        let color = if pending_restart {
-            theme::warning()
-        } else {
-            match check.state {
-                preflight::State::Pass => theme::text_muted(),
-                preflight::State::Warn => theme::accent(),
-                preflight::State::Fail => theme::error(),
-                preflight::State::Skip => theme::border(),
-            }
+        let state = self.row_state(check);
+        let busy = self.setup_busy();
+        let fix = self.row_fix(check.id);
+        let color = match state {
+            RowState::InProgress => theme::accent(),
+            RowState::Failed | RowState::NeedsAction => theme::error(),
+            RowState::RestartRequired => theme::warning(),
+            RowState::Done if check.state == preflight::State::Warn => theme::accent(),
+            RowState::Done => theme::text(),
+            RowState::Skipped => theme::border(),
         };
-        let is_active = self.onboarding_step == Some(check.id);
-        // This row's fix, however it was started. Tying it to `is_active` hid the spinner and
-        // the live log whenever a row's own button was pressed rather than "Get Started",
-        // because only the auto-run sets `onboarding_step`.
-        let running = self.running_fix.as_ref().is_some_and(|fix| fix.check_id == check.id);
+        let glyph = match state {
+            RowState::Failed | RowState::NeedsAction => "✗",
+            RowState::RestartRequired => "!",
+            RowState::Done => "✓",
+            RowState::Skipped => "–",
+            RowState::InProgress => "",
+        };
+        let detail = match (state, fix) {
+            (RowState::InProgress, Some(fix)) => self.progress_detail(fix),
+            (RowState::Failed, Some(fix)) => failure_summary(check.id, &fix.lines, fix.stopping, fix.timed_out),
+            (RowState::RestartRequired, _) => {
+                "Installed. Restart your computer to finish, then open Mini-Me again.".to_string()
+            }
+            _ => check.detail.clone(),
+        };
 
         let mut row = div()
             .flex()
@@ -168,32 +197,21 @@ impl Workbench {
                     .gap_2()
                     .w_full()
                     .min_w_0()
-                    .child(if running && self.running_fix.as_ref().is_some_and(|fix| !fix.done) {
+                    .child(if state == RowState::InProgress {
                         ui::Spinner::new(SharedString::from(format!("spinner-{}", check.id)))
                             .into_any_element()
                     } else {
                         div()
-                            .text_color(rgb(if check.state == preflight::State::Pass {
-                                theme::text()
-                            } else {
-                                color
-                            }))
+                            .text_color(rgb(color))
                             .text_sm()
-                            // Not `check.state.glyph()` here: that would print the ✗ of an
-                            // ordinary failure, and this row is the opposite of one — the
-                            // fix already succeeded, and a restart is the only thing left.
-                            .child(if pending_restart { "!" } else { check.state.glyph() })
+                            .child(glyph)
                             .into_any_element()
                     })
                     .child(
                         div()
                             .flex_grow()
                             .min_w_0()
-                            .text_color(rgb(if check.state == preflight::State::Pass {
-                                theme::text()
-                            } else {
-                                color
-                            }))
+                            .text_color(rgb(color))
                             .text_sm()
                             .child(check.label),
                     )
@@ -218,75 +236,29 @@ impl Workbench {
                 div()
                     .w_full()
                     .min_w_0()
-                    .text_color(rgb(theme::text_muted()))
-                    .text_xs()
-                    // `check.detail` still reads "isn't responding" here — true of the probe,
-                    // but read by a person as "it didn't install," which is the opposite of
-                    // what happened. Restate it as the plain fact: installed, restart pending.
-                    .child(if rechecking {
-                        "Done — checking it again…".to_string()
-                    } else if restart_needed {
-                        "Installed — restart your computer, then reopen Mini-Me for this to \
-                         turn green."
-                            .to_string()
+                    .text_color(rgb(if state == RowState::Failed {
+                        theme::error()
                     } else {
-                        check.detail.clone()
-                    }),
+                        theme::text_muted()
+                    }))
+                    .text_xs()
+                    .child(detail),
             );
 
-        // A step that already ran and is no longer the one being driven: one line, not the
-        // full log it printed.
-        if !is_active {
-            if let Some(result) = self
-                .onboarding_history
-                .iter()
-                .find(|result| result.check_id == check.id)
-            {
-                row = row.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .text_color(rgb(theme::text_muted()))
-                        .text_xs()
-                        .child(format!(
-                            "{} — {}",
-                            result.label,
-                            if result.ok { "done" } else { "failed" }
-                        )),
-                );
-                return row;
-            }
-        }
-
-        // Waiting on the user: a `Fix::Manual` step the auto-run reached and
-        // paused on, or the same rendered before the sequence has started at all.
-        //
-        // Not when `pending_restart`, though — the auto-run parks there with
-        // `onboarding_awaiting_manual == Some(check.id)` too, on purpose (see the comment
-        // in `onboarding_advance`), and re-offering "Install Ubuntu" here would sit a
-        // button that re-runs an already-successful install directly above the log
-        // explaining that it already worked and only a restart is left. That combination
-        // is exactly what read as confusing.
-        if !pending_restart
-            && (self.onboarding_awaiting_manual == Some(check.id)
-                // A skipped step stays actionable once the sequence stops, so a key can still
-                // be pasted after skipping past it.
-                || (!self.onboarding_auto_running && self.onboarding_skipped.contains(&check.id))
-                || (!self.onboarding_auto_running
-                    && self.running_fix.is_none()
-                    && check.state != preflight::State::Pass))
-        {
-            for fix in &check.fixes {
-                match fix {
-                    preflight::Fix::Run { label, argv, note } => {
-                        let command = preflight::display_argv(argv);
-                        let busy = self.running_fix.as_ref().is_some_and(|fix| !fix.done);
-                        row = row
-                            .child(div().text_color(rgb(theme::text_muted())).text_xs().child(*note))
-                            .child(
-                                ui::actions()
-                                    .gap_2()
-                                    .child(
+        match state {
+            RowState::NeedsAction => {
+                for action in &check.fixes {
+                    match action {
+                        preflight::Fix::Run { label, argv, note } => {
+                            row = row
+                                .child(
+                                    div()
+                                        .text_color(rgb(theme::text_muted()))
+                                        .text_xs()
+                                        .child(*note),
+                                )
+                                .child(
+                                    ui::actions().child(
                                         ui::Button::new(SharedString::from(format!(
                                             "run-{}",
                                             check.id
@@ -307,44 +279,68 @@ impl Workbench {
                                                 );
                                             }
                                         })),
-                                    )
-                                    .child(
-                                        ui::Button::new(SharedString::from(format!(
-                                            "copy-{}",
-                                            check.id
-                                        )))
-                                        .text("Copy ⧉")
-                                        .on_click(cx.listener({
-                                            let command = command.clone();
-                                            move |workbench, _event, _window, cx| {
-                                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                                    command.clone(),
-                                                ));
-                                                workbench.say("command copied", cx);
-                                                cx.notify();
-                                            }
-                                        })),
                                     ),
+                                );
+                            // One action per row: the first fix is the one that makes the row
+                            // done, and a second button beside it only asks the researcher to
+                            // choose between things they cannot judge.
+                            break;
+                        }
+                        preflight::Fix::Manual(instruction) => {
+                            row = row.child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .text_color(rgb(theme::text_muted()))
+                                    .text_xs()
+                                    .child(instruction.clone()),
                             );
-                    }
-                    preflight::Fix::Manual(instruction) => {
-                        row = row.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .text_color(rgb(theme::text_muted()))
-                                .text_xs()
-                                .child(format!(
-                                    "{instruction} — this step needs you; press Continue below \
-                                     once it's done"
-                                )),
-                        );
-                    }
-                    preflight::Fix::EnterKey => {
-                        row = row.child(self.onboarding_key_entry(check.id, cx));
+                        }
+                        preflight::Fix::EnterKey => {
+                            row = row.child(self.onboarding_key_entry(check.id, cx));
+                        }
                     }
                 }
             }
+            RowState::InProgress => {
+                if let Some(fix) = fix {
+                    row = row.child(self.onboarding_fix_progress(fix, cx));
+                }
+            }
+            RowState::Failed => {
+                if let Some(fix) = fix {
+                    let check_id = check.id;
+                    row = row.child(
+                        ui::actions()
+                            .gap_2()
+                            .child(
+                                ui::Button::new(SharedString::from(format!("retry-{check_id}")))
+                                    .text("Retry")
+                                    .style(ui::ButtonStyle::Primary)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                        workbench.retry_fix(check_id, cx);
+                                    })),
+                            )
+                            .child(
+                                ui::Button::new(SharedString::from(format!(
+                                    "details-{check_id}"
+                                )))
+                                .text(if fix.show_details { "Hide details" } else { "Show details" })
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    if let Some(fix) = workbench.running_fix.as_mut() {
+                                        fix.show_details = !fix.show_details;
+                                    }
+                                    cx.notify();
+                                })),
+                            ),
+                    );
+                    if fix.show_details {
+                        row = row.child(self.onboarding_fix_log(fix, cx));
+                    }
+                }
+            }
+            RowState::RestartRequired | RowState::Done | RowState::Skipped => {}
         }
 
         if self.onboarding_skipped.contains(&check.id) && check.state != preflight::State::Pass {
@@ -358,15 +354,20 @@ impl Workbench {
             );
         }
 
-        // The active row's live output — the same box the old Setup pane showed at the
-        // bottom, now anchored under the step it belongs to.
-        if running {
-            if let Some(fix) = &self.running_fix {
-                row = row.child(self.onboarding_fix_log(fix, cx));
-            }
-        }
-
         row
+    }
+
+    /// One line saying what the running fix is doing, for its row's detail.
+    fn progress_detail(&self, fix: &RunningFix) -> String {
+        if fix.stopping {
+            format!("{} — stopping…", fix.label)
+        } else if fix.scan_sign_in && fix.link.is_some() {
+            "Waiting for you to approve the sign-in in your browser…".to_string()
+        } else if fix.scan_sign_in {
+            "Installing Asta if needed, then starting sign-in…".to_string()
+        } else {
+            format!("{}…", fix.label)
+        }
     }
 
     /// The key step's own controls: the masked API key field Settings uses, Save, and Skip.
@@ -401,6 +402,7 @@ impl Workbench {
         if let Some((_, composer)) = self.fields.iter().find(|(field, _)| *field == Field::ApiKey)
         {
             let testing = matches!(self.key_test, Some(KeyTest::Running));
+            let busy = self.setup_busy();
             entry = entry.child(
                 div()
                     .flex()
@@ -425,7 +427,7 @@ impl Workbench {
                         div().flex_none().child(
                             ui::Button::new("onboarding-test-key")
                                 .text(if testing { "Testing…" } else { "Test key" })
-                                .disabled(testing)
+                                .disabled(testing || busy)
                                 .on_click(cx.listener(|workbench, _event, _window, cx| {
                                     workbench.test_onboarding_key(cx);
                                 })),
@@ -458,6 +460,7 @@ impl Workbench {
                     ui::Button::new("onboarding-save-key")
                         .text("Save key")
                         .style(ui::ButtonStyle::Primary)
+                        .disabled(self.setup_busy())
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.save_onboarding_key(cx);
                         })),
@@ -474,69 +477,18 @@ impl Workbench {
         )
     }
 
-    /// The live/finished output of whichever fix is running — Stop, sign-in link, the
-    /// scrolling tail of its lines, and the app's own verdict below them.
-    fn onboarding_fix_log(&self, fix: &RunningFix, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut log = div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_w_0()
-            .flex_none()
-            .gap_2()
-            .p_2()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(if !fix.done {
-                theme::accent()
-            } else if fix.ok {
-                theme::border()
-            } else {
-                theme::error()
-            }))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .w_full()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .flex_grow()
-                            .min_w_0()
-                            .text_color(rgb(theme::text()))
-                            .text_sm()
-                            .child(if fix.done {
-                                format!("{} — {}", fix.label, if fix.ok { "done" } else { "failed" })
-                            } else if fix.stopping {
-                                format!("{} — stopping…", fix.label)
-                            } else {
-                                format!("{}…", fix.label)
-                            }),
-                    )
-                    .when(!fix.done, |header| {
-                        header.child(
-                            ui::Button::new("stop-fix")
-                                .text("Stop")
-                                .style(ui::ButtonStyle::Danger)
-                                .disabled(fix.stopping || !fix.cancel.armed())
-                                .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                    workbench.stop_fix(cx);
-                                })),
-                        )
-                    }),
-            );
+    /// What a running fix shows under its row: Stop, and the sign-in code if it printed one.
+    /// Its output stays hidden — it only matters if the fix fails.
+    fn onboarding_fix_progress(&self, fix: &RunningFix, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut panel = div().flex().flex_col().w_full().min_w_0().gap_2();
 
         if let Some(link) = &fix.link {
             if let Some(code) = device_code(link) {
-                log = log.child(
+                panel = panel.child(
                     div().w_full().min_w_0().text_color(rgb(theme::accent())).text_lg().child(code),
                 );
             }
-            log = log.child(
+            panel = panel.child(
                 div()
                     .flex()
                     .flex_row()
@@ -569,6 +521,34 @@ impl Workbench {
             );
         }
 
+        panel.child(
+            ui::actions().child(
+                ui::Button::new("stop-fix")
+                    .text("Stop")
+                    .style(ui::ButtonStyle::Danger)
+                    .disabled(fix.stopping || !fix.cancel.armed())
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.stop_fix(cx);
+                    })),
+            ),
+        )
+    }
+
+    /// A failed fix's output, shown only on "Show details": the tail of its lines, then the
+    /// app's own notes about the run.
+    fn onboarding_fix_log(&self, fix: &RunningFix, _cx: &mut Context<Self>) -> impl IntoElement {
+        let mut log = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .gap_2()
+            .p_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::border()));
+
         let mut output = div()
             .id("fix-output")
             .flex()
@@ -585,15 +565,12 @@ impl Workbench {
         }
         if fix.lines.is_empty() {
             output = output.child(
-                div().text_color(rgb(theme::text_muted())).text_xs().child(if fix.done {
-                    // Also what a genuinely silent command looks like, but that's rare —
-                    // most either print something or, like the elevated WSL install,
-                    // open a real window of their own this app can never read (docs §XX).
+                div().text_color(rgb(theme::text_muted())).text_xs().child(
+                    // What a command that ran in a window of its own looks like — the elevated
+                    // WSL install is one — as well as a genuinely silent one.
                     "Nothing to show here — check the sidecar log below, or a window the \
-                     command may have opened of its own."
-                } else {
-                    "starting… if this opens its own window, watch that instead"
-                }),
+                     command may have opened of its own.",
+                ),
             );
         }
         log = log.child(output);
@@ -607,94 +584,37 @@ impl Workbench {
         log
     }
 
-    /// The primary action, whose label and handler track exactly where the sequence is.
+    /// Get started, enabled only once every required step is done and nothing is running.
     fn onboarding_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut actions = ui::actions().gap_2();
-
+        let busy = self.setup_busy();
+        let installing = self.running_fix.as_ref().is_some_and(|fix| !fix.done);
+        let primary = ui::Button::new("onboarding-primary").style(ui::ButtonStyle::Primary);
         let primary = match &self.report {
-            None => ui::Button::new("onboarding-primary").text("Checking…").disabled(true),
-            // Checked before `ready()`: a Fail-free report can still be mid-sequence on an
-            // *optional* step (Asta, Dataverse) the auto-run is trying anyway, and that must
-            // read as "working", not as done early.
-            Some(_) if self.onboarding_auto_running => {
-                ui::Button::new("onboarding-primary").text("Working…").disabled(true)
-            }
-            // `ready()` alone, not "nothing left at all" and not "nothing waiting on you":
-            // once every non-optional check passes, a stuck *optional* one (Asta needs a
-            // login it can't get, Dataverse needs an account this machine doesn't have)
-            // must never be the one thing standing between a researcher and "Done" — that
-            // is exactly what marking it optional means. Checked ahead of the
-            // Continue/Retry arms below for the same reason.
-            Some(report) if report.ready() => ui::Button::new("onboarding-primary")
-                .text("Done")
-                .style(ui::ButtonStyle::Primary)
-                .on_click(cx.listener(|workbench, _event, _window, cx| {
-                    workbench.mark_onboarded();
-                    workbench.onboarding_open = false;
-                    workbench.restore_focus = true;
-                    cx.notify();
-                })),
-            Some(_) if self.onboarding_awaiting_manual.is_some() => {
-                ui::Button::new("onboarding-primary")
-                    .text("Continue")
-                    .style(ui::ButtonStyle::Primary)
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.resume_onboarding(cx);
-                    }))
-            }
-            // The sequence ran out with only skipped steps left. Not "Done": a skipped
-            // required step means onboarding is not finished, so closing does not record it.
-            Some(_)
-                if !self.onboarding_skipped.is_empty() && self.onboarding_next_check().is_none() =>
-            {
-                ui::Button::new("onboarding-primary")
-                    .text("Close")
-                    .style(ui::ButtonStyle::Primary)
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.onboarding_open = false;
-                        workbench.restore_focus = true;
-                        cx.notify();
-                    }))
-            }
-            Some(_) if self.running_fix.as_ref().is_some_and(|fix| fix.done && !fix.ok) => {
-                ui::Button::new("onboarding-primary")
-                    .text("Retry")
-                    .style(ui::ButtonStyle::Primary)
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.retry_onboarding_step(cx);
-                    }))
-            }
-            Some(_) => ui::Button::new("onboarding-primary")
-                .text("Get Started")
-                .style(ui::ButtonStyle::Primary)
-                .on_click(cx.listener(|workbench, _event, _window, cx| {
-                    workbench.start_onboarding(cx);
-                })),
-        };
-        actions = actions.child(primary);
-
-        // Beside Retry only — once `report.ready()` the primary button is already "Done",
-        // and a second button offering to re-check a failed *optional* fix would be
-        // redundant with it.
-        let not_ready = self.report.as_ref().is_some_and(|report| !report.ready());
-        if not_ready && self.running_fix.as_ref().is_some_and(|fix| fix.done && !fix.ok) {
-            actions = actions.child(
-                ui::Button::new("onboarding-recheck").text("Re-check instead").on_click(
-                    cx.listener(|workbench, _event, _window, cx| workbench.run_preflight(cx)),
-                ),
-            );
-        }
-
-        actions.child(
-            ui::Button::new("onboarding-skip").text("Skip for now").on_click(cx.listener(
+            None => primary.text("Checking…").disabled(true),
+            Some(_) if installing => primary.text("Installing…").disabled(true),
+            Some(_) if busy => primary.text("Checking…").disabled(true),
+            Some(_) if self.restart_required => primary.text("Restart to finish").disabled(true),
+            Some(report) if report.ready() => primary.text("Get started").on_click(cx.listener(
                 |workbench, _event, _window, cx| {
-                    workbench.onboarding_auto_running = false;
                     workbench.mark_onboarded();
                     workbench.onboarding_open = false;
                     workbench.restore_focus = true;
                     cx.notify();
                 },
             )),
+            Some(_) => primary.text("Get started").disabled(true),
+        };
+
+        ui::actions().gap_2().child(primary).child(
+            ui::Button::new("onboarding-skip")
+                .text("Skip for now")
+                .disabled(busy)
+                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    workbench.mark_onboarded();
+                    workbench.onboarding_open = false;
+                    workbench.restore_focus = true;
+                    cx.notify();
+                })),
         )
     }
 
@@ -707,9 +627,12 @@ impl Workbench {
             .min_w_0()
             .gap_1()
             .child(
-                ui::Button::new("onboarding-restart-backend").text("Restart backend").on_click(
-                    cx.listener(|workbench, _event, _window, cx| workbench.restart_backend(cx)),
-                ),
+                ui::Button::new("onboarding-restart-backend")
+                    .text("Restart backend")
+                    .disabled(self.setup_busy())
+                    .on_click(
+                        cx.listener(|workbench, _event, _window, cx| workbench.restart_backend(cx)),
+                    ),
             )
             .child(
                 div()

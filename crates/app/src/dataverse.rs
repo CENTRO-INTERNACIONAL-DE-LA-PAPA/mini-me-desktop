@@ -18,7 +18,7 @@
 //! On the desktop it is not, because of one fact that took a while to notice: **the thread's
 //! folder is the sandbox's working directory**. `crate::workspace` puts it on the Windows side at
 //! `Documents\Mini-Me\<thread>` and the backend writes there through `MINIME_LOCAL_WORKSPACE`. So
-//! a file the app downloads is a file `data_cleaning`, EDA and DataVoyager can already open — the
+//! a file the app downloads is a file `data_cleaning` and EDA can already open — the
 //! loop closes without the agent being handed a network tool at all.
 //!
 //! # Open datasets only, and not on the model's word

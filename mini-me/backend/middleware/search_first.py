@@ -15,14 +15,9 @@ model has. The mechanism, and the fix, are set out once in `middleware/tool_gate
 
 # What is specific to this one
 
-The tool the first call is forced into is `find_papers` and not one of the Asta MCP searches,
-because it is the only one that returns a reference already built from the publisher's record
-(`backend/paper_tools.py`). The MCP snippet search returns a title and a corpus id, which is what
-left the model composing the other five fields from memory in the first place.
-
-But *any* search satisfies the gate. A model that reached for Asta's own tools has engaged with
-the literature, and forcing it back through ours would be overriding a reasonable choice rather
-than preventing an unreasonable one.
+The tool the first call is forced into is `find_papers`, the academic researcher's only search
+tool: it returns a reference already built from the publisher's record (`backend/paper_tools.py`),
+so the model has no citation field left to compose from memory.
 
 # Verified
 
@@ -49,16 +44,7 @@ logger = logging.getLogger(__name__)
 SEARCH_TOOL = "find_papers"
 
 #: Any of these having run counts as "the agent has searched".
-SEARCH_TOOLS = frozenset(
-    {
-        SEARCH_TOOL,
-        "snippet_search",
-        "search_papers_by_relevance",
-        "search_paper_by_title",
-        "get_papers",
-        "get_paper_batch",
-    }
-)
+SEARCH_TOOLS = frozenset({SEARCH_TOOL})
 
 
 class SearchBeforeCiting(ToolsBeforeAnswering):

@@ -84,10 +84,11 @@ pub const PROVIDERS: [Provider; 5] = [
         id: "custom",
         label: "Custom (OpenAI-compatible)",
         needs_base_url: true,
-        suggested_model: "openai/gpt-4o-mini",
+        suggested_model: DEFAULT_MODEL,
         // An OpenAI-compatible endpoint could be anything, so these are only examples of
         // the *shape* an OpenRouter or Ollama id takes.
         models: &[
+            DEFAULT_MODEL,
             "openai/gpt-4o-mini",
             "anthropic/claude-sonnet-4.5",
             "meta-llama/llama-3.3-70b-instruct",
@@ -95,6 +96,12 @@ pub const PROVIDERS: [Provider; 5] = [
         ],
     },
 ];
+
+/// What a fresh install starts with: this model through OpenRouter, reached as the `custom`
+/// provider with [`DEFAULT_BASE_URL`].
+pub const DEFAULT_MODEL: &str = "google/gemini-3.7-flash";
+pub const DEFAULT_PROVIDER: &str = "custom";
+pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 pub fn provider(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|provider| provider.id == id)
@@ -211,9 +218,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            provider: "anthropic".to_string(),
-            model_id: PROVIDERS[0].suggested_model.to_string(),
-            base_url: String::new(),
+            provider: DEFAULT_PROVIDER.to_string(),
+            model_id: DEFAULT_MODEL.to_string(),
+            base_url: DEFAULT_BASE_URL.to_string(),
             approve_execute: true,
             backend_port: 2024,
             backend_dir: String::new(),
@@ -596,8 +603,8 @@ pub fn keychain_status() -> Result<()> {
     }
 }
 
-/// The two Asta credentials, which — unlike the model key — genuinely have to reach the
-/// backend as environment variables: the `asta` CLI reads them from its environment when
+/// The Asta credential, which — unlike the model key — genuinely has to reach the
+/// backend as an environment variable: the `asta` CLI reads it from its environment when
 /// `execute` runs a command, so there is no in-request path for them (docs §20).
 ///
 /// **The model key is deliberately not on this list, and background work is not an
@@ -606,7 +613,7 @@ pub fn keychain_status() -> Result<()> {
 /// instead (docs §38). That is both more correct — a `custom` endpoint needs its
 /// `base_url`, which no environment variable carries — and safer, since the environment
 /// here is one the agent's own `execute` tool can read.
-pub const ASTA_SECRETS: [&str; 2] = ["ASTA_TOKEN", "ASTA_API_KEY"];
+pub const ASTA_SECRETS: [&str; 1] = ["ASTA_TOKEN"];
 
 pub fn asta_env() -> Vec<(String, String)> {
     ASTA_SECRETS
@@ -945,6 +952,18 @@ mod tests {
         };
         assert_eq!(nonsense.misdirects_a_turn(false), None);
         assert!(!nonsense.problems(false).is_empty(), "still reported");
+    }
+
+    #[test]
+    fn a_fresh_install_starts_on_gemini_flash_through_openrouter() {
+        let fresh = Settings::default();
+        assert_eq!(fresh.provider, "custom");
+        assert_eq!(fresh.model_id, "google/gemini-3.7-flash");
+        assert_eq!(fresh.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(fresh.model_spec(), "custom::google/gemini-3.7-flash");
+        // The URL is what makes `custom` OpenRouter; without it the default would be blocked.
+        assert_eq!(fresh.misdirects_a_turn(true), None);
+        assert_eq!(provider("custom").unwrap().suggested_model, DEFAULT_MODEL);
     }
 
     #[test]
