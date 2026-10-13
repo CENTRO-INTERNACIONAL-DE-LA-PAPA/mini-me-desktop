@@ -230,7 +230,8 @@ async def validate_dataset(
         {
             "dataset": path,
             "report_path": _relative(work_dir, report_json),
-            "html_report": _relative(work_dir, report_html),
+            # None when Pointblank could not draw the page; the checks are still real.
+            "html_report": None if report.get("html_error") else _relative(work_dir, report_html),
             "all_passed": bool(report.get("all_passed")),
             "checks": checks,
             "error": None,

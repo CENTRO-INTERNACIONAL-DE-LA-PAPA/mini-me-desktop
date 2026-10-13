@@ -30,6 +30,7 @@ from backend.schemas import (
 from backend.middleware import (
     ArtifactCaptureMiddleware,
     ClaimsRecorder,
+    CommandBudget,
     KeepSources,
     RunBeforeReporting,
     DraftBeforeReporting,
@@ -113,7 +114,10 @@ data_cleaning_subagent = {
 
         Pointblank is your validation engine. For every dataset you report on:
         1. Run `profile_dataset` to see its shape, types, missing values and duplicates.
-        2. Run `validate_dataset`, with the key columns and the columns that must not be empty.
+        2. Only after the profile has returned, run `validate_dataset` with the key columns and
+           the columns that must not be empty, chosen from the profile. (Given no columns, it
+           checks every column for empty values and the file for duplicate rows.)
+           Its failed checks are what your inspection script looks into.
         3. After cleaning, run `validate_dataset` again on the cleaned file.
         Never present checks you wrote yourself as Pointblank results. If a tool returns an
         `error`, say that validation could not run and why.
@@ -131,7 +135,10 @@ data_cleaning_subagent = {
           `cleaning/01_inspect.py`, `cleaning/02_clean.py`) and run it with
           `python cleaning/02_clean.py`, so the researcher keeps a reproducible record.
         - If a script fails, fix the script and run it again; do not fall back to one-liners.
-        Aim for about five commands for the whole task.
+        - If the inspection leaves a question open, edit `01_inspect.py` and run it again.
+          Never create a second inspection script.
+        Aim for about five commands for the whole task. After 10 commands, further commands
+        are refused, so make each one count.
 
         Answer with:
         - a table of every check `validate_dataset` returned, with the columns
@@ -654,6 +661,9 @@ def _build_runtime_subagents(
             # `middleware/validate_first.py`. Nothing on this subagent forces `tool_choice`: it has
             # no `response_format`, and this gate works after the model call instead.
             extra_middleware.append(ValidateBeforeAnswering())
+            # The prompt asks for about five commands; this is the backstop when it is ignored —
+            # see `middleware/command_budget.py`.
+            extra_middleware.append(CommandBudget())
 
         # **Every subagent, not only the discovery one.** `execute` is kept for all of them and
         # ASTA_TOKEN is injected into every command it runs, so any of them could spend the same

@@ -127,6 +127,14 @@ def test_every_check_comes_back_with_the_report_paths():
     assert result["html_report"] == "validation/plots-validation.html"
 
 
+def test_a_failed_html_page_still_returns_every_check():
+    report = {**REPORT, "html_error": "ValueError: cannot draw the table"}
+    result = _call(validate_dataset, _Sandbox(json.dumps(report)), path="/plots.csv")
+    assert result["error"] is None
+    assert len(result["checks"]) == 2
+    assert result["html_report"] is None
+
+
 def test_no_sandbox_is_an_error_not_a_raise():
     from backend.runtime import _active_sandbox
 

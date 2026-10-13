@@ -55,6 +55,11 @@ def _build_validator(df, table_name: str, rules: dict[str, Any] | None, keys: li
         validator = validator.col_vals_not_null(columns=not_null)
 
     if not rules:
+        if not keys and not not_null:
+            # Without this an unconfigured call validates nothing, reports `all_passed` on any
+            # file, and Pointblank cannot draw the HTML table for an empty plan.
+            validator = validator.col_vals_not_null(columns=[str(column) for column in df.columns])
+            validator = validator.rows_distinct()
         return validator
 
     checks = rules.get("checks", [])
@@ -117,20 +122,25 @@ def main() -> None:
         "table_name": table_name,
         "all_passed": bool(validator.all_passed()),
         "summary": {
-            "n": to_jsonable(validator.n),
-            "n_passed": to_jsonable(validator.n_passed),
-            "n_failed": to_jsonable(validator.n_failed),
-            "f_passed": to_jsonable(validator.f_passed),
-            "f_failed": to_jsonable(validator.f_failed),
+            "n": to_jsonable(validator.n()),
+            "n_passed": to_jsonable(validator.n_passed()),
+            "n_failed": to_jsonable(validator.n_failed()),
+            "f_passed": to_jsonable(validator.f_passed()),
+            "f_failed": to_jsonable(validator.f_failed()),
         },
         "checks": steps,
         "checks_summary": summarize_checks(steps),
+        "html_error": None,
     }
-    write_json(report, args.output)
     if args.html:
-        html_path = Path(args.html)
-        html_path.parent.mkdir(parents=True, exist_ok=True)
-        html_path.write_text(validator.get_tabular_report().as_raw_html(), encoding="utf-8")
+        # A failed HTML render costs the report page, never the check results.
+        try:
+            html_path = Path(args.html)
+            html_path.parent.mkdir(parents=True, exist_ok=True)
+            html_path.write_text(validator.get_tabular_report().as_raw_html(), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            report["html_error"] = f"{type(exc).__name__}: {exc}"[:300]
+    write_json(report, args.output)
     print(f"Wrote validation report to {args.output}")
 
 
