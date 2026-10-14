@@ -161,7 +161,7 @@ pub(crate) fn markdown_block(
     use markdown::{Block, Emphasis};
 
     let styled = |inlines: &markdown::Inlines, base: u32| {
-        let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = inlines
+        let highlights = inlines
             .styles
             .iter()
             .map(|(range, emphasis)| {
@@ -194,8 +194,15 @@ pub(crate) fn markdown_block(
                     },
                 };
                 (range.clone(), style)
-            })
-            .collect();
+            });
+        // **Flattened, because the parser nests and GPUI does not.** `push_nested` records
+        // `**bold *italic* bold**` as an outer range with an inner one inside it, while
+        // `with_highlights` reads its input as sorted, disjoint runs: an overlap made the run
+        // lengths add up past the text, every later boundary shifted, and the first one to land
+        // inside a multi-byte character (an en dash) panicked in DirectWrite — which, inside the
+        // window procedure, aborts the app with 0xc0000409.
+        let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> =
+            gpui::combine_highlights(highlights, []).collect();
         let text = StyledText::new(inlines.text.clone()).with_highlights(highlights);
         let element = div().w_full().min_w_0().text_color(rgb(base)).text_sm();
         match selectable {
