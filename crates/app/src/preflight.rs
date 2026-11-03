@@ -85,6 +85,17 @@ pub(crate) fn asta_setup_fix(config: &BackendConfig, label: &'static str) -> Fix
     }
 }
 
+/// Sign out of Asta where the backend runs, removing the CLI's stored credentials.
+///
+/// Succeeds when the CLI is not installed, because then there is nothing to sign out of and the
+/// keychain token (cleared by the caller) is the only credential left.
+pub(crate) fn asta_logout_argv(config: &BackendConfig) -> Vec<String> {
+    config.shell_argv(
+        "export PATH=\"$HOME/.local/bin:$PATH\"; \
+         if command -v asta >/dev/null 2>&1; then asta auth logout; fi",
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     /// Verified present.

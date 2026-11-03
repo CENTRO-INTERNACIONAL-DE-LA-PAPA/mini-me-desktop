@@ -142,7 +142,10 @@ into your browser yourself.
 
 If the step says your account **"can't generate research theories"**, literature search still
 works. Only the idea-generation feature needs extra permission — ask your team lead which Asta
-account to use, then click **Sign in again**.
+account to use, then switch to it as described below.
+
+To **log out** of Asta, or to switch to another account, press **Log out** on the Asta step.
+The step goes back to **Sign in to Asta**, ready for the next sign-in.
 
 ### 7. CIP Dataverse (required)
 

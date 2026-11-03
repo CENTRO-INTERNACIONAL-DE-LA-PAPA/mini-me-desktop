@@ -2303,6 +2303,10 @@ const FIX_LOG_LINES: usize = 200;
 /// "installing" forever.
 const ASTA_SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+/// The `check_id` an Asta sign-out runs under. Distinct from `"asta"`, so it is not treated as
+/// a sign-in (no device-code scan, no timeout) and does not replace the row with its own progress.
+const ASTA_LOGOUT: &str = "asta-logout";
+
 /// One editable primitive from an MCP elicitation form.
 struct McpElicitationField {
     interrupt: String,
@@ -4142,6 +4146,10 @@ impl Workbench {
             self.restart_backend_with(false, cx);
             return;
         }
+        if check_id == ASTA_LOGOUT {
+            self.finish_asta_logout(cx);
+            return;
+        }
         if check_id == "runtime" && cfg!(windows) {
             // `wsl --install` exits 0 with the distro still unregistered until Windows
             // restarts, so the row cannot honestly be green yet (docs §60).
@@ -4162,6 +4170,14 @@ impl Workbench {
         if unchecked && !self.restart_required {
             self.run_preflight(cx);
         }
+    }
+
+    /// The sign-out succeeded. A sign-in earlier this session recorded the row as done, and that
+    /// record would override the re-check, so it goes first. The restart re-checks, which turns
+    /// the row to "not signed in" and brings back its sign-in button.
+    fn finish_asta_logout(&mut self, cx: &mut Context<Self>) {
+        self.locally_done.remove("asta");
+        self.restart_backend_with(true, cx);
     }
 
     /// Stop the repair that is running, if one is.

@@ -340,6 +340,35 @@ impl Workbench {
                     }
                 }
             }
+            // Signed in: the one way to sign out, or to switch accounts (log out, then sign in).
+            RowState::Done if check.id == "asta" => {
+                let logout = self
+                    .running_fix
+                    .as_ref()
+                    .filter(|fix| fix.check_id == ASTA_LOGOUT);
+                let logging_out = logout.is_some_and(|fix| !fix.done);
+                row = row.child(
+                    ui::actions().child(
+                        ui::Button::new("logout-asta")
+                            .text(if logging_out { "Logging out…" } else { "Log out" })
+                            .disabled(busy)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                let argv = workbench.sidecar.asta_logout_argv();
+                                workbench.start_fix("Log out of Asta".into(), argv, ASTA_LOGOUT, cx);
+                            })),
+                    ),
+                );
+                if logout.is_some_and(|fix| fix.done && !fix.ok) {
+                    row = row.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_color(rgb(theme::error()))
+                            .text_xs()
+                            .child("Couldn't log out of Asta. Try again."),
+                    );
+                }
+            }
             RowState::RestartRequired | RowState::Done | RowState::Skipped => {}
         }
 

@@ -1815,6 +1815,11 @@ impl Sidecar {
     /// cancel `spawn_blocking`, and aborting the Tokio task does not either. What is killable is
     /// the process `run_streaming` spawns, so that is what escapes — see `preflight::Cancel`, and
     /// §170 for why it is a pid and not the process-group handshake §168 designed.
+    /// The command that signs out of Asta, routed for where the backend runs.
+    pub fn asta_logout_argv(&self) -> Vec<String> {
+        crate::preflight::asta_logout_argv(&self.config)
+    }
+
     pub fn run_fix(&self, argv: Vec<String>) -> (mpsc::UnboundedReceiver<FixEvent>, Cancel) {
         let (tx, rx) = mpsc::unbounded();
         let cancel = Cancel::default();
