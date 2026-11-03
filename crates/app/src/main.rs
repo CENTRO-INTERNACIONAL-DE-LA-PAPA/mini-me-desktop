@@ -286,6 +286,12 @@ fn named_files(text: &str) -> Vec<String> {
 /// nothing about the real key's.
 const STORED_KEY_PLACEHOLDER: &str = "********************";
 
+/// `text` without any whitespace. A pasted key can carry a trailing newline or a stray space
+/// that a masked field never shows, and no key legitimately contains either.
+fn strip_whitespace(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// A fingerprint of what was in the key field, so a test result can tell the key changed without
 /// keeping a copy of it.
 fn key_fingerprint(text: &str) -> u64 {
@@ -2945,6 +2951,23 @@ impl Workbench {
             })
             .collect();
 
+        // Enter in the key field saves it, the same as clicking Save: whichever of onboarding
+        // or Settings is showing decides which Save that is.
+        if let Some((_, key_field)) = fields.iter().find(|(field, _)| *field == Field::ApiKey) {
+            cx.subscribe(key_field, |workbench, key_field, event, cx| match event {
+                ComposerEvent::Submit(text) => {
+                    // The composer empties itself on submit; put the key back so Save reads it.
+                    key_field.update(cx, |composer, cx| composer.set_text(text.clone(), cx));
+                    if workbench.onboarding_open {
+                        workbench.save_onboarding_key(cx);
+                    } else if workbench.settings_open {
+                        workbench.save_settings(cx);
+                    }
+                }
+            })
+            .detach();
+        }
+
         // Read once. It used to be read twice in this literal and the panel states would have
         // made it three — one file, opened three times, in a constructor.
         let stored = settings::Settings::load();
@@ -3701,7 +3724,7 @@ impl Workbench {
     /// Bound to the key step's Save: file the pasted key where every turn reads it, and mark
     /// the step done — storing it was the whole step, so there is nothing left to check.
     fn save_onboarding_key(&mut self, cx: &mut Context<Self>) {
-        let value = self.field_text(Field::ApiKey, cx);
+        let value = strip_whitespace(&self.field_text(Field::ApiKey, cx));
         if value.is_empty() {
             self.say("paste your API key first", cx);
             return;
@@ -3752,8 +3775,8 @@ impl Workbench {
     /// Ask the provider whether the key works: the one in the field if something is typed there,
     /// otherwise the one already in the keychain. Nothing is saved.
     fn test_onboarding_key(&mut self, cx: &mut Context<Self>) {
-        let typed = self.field_text(Field::ApiKey, cx);
-        self.key_tested = Some((self.draft.provider.clone(), key_fingerprint(&typed)));
+        let typed = strip_whitespace(&self.field_text(Field::ApiKey, cx));
+        self.key_tested =Some((self.draft.provider.clone(), key_fingerprint(&typed)));
         // Read here, on the main thread — the keychain is not safe to touch from a Tokio worker.
         let key = if typed.is_empty() {
             settings::secret(&format!("llm:{}", self.draft.provider))
@@ -3868,7 +3891,7 @@ impl Workbench {
     /// Whether the "Test key" result still describes what is on screen: same provider, same text
     /// in the key field.
     fn key_test_is_current(&self, cx: &App) -> bool {
-        let typed = self.field_text(Field::ApiKey, cx);
+        let typed = strip_whitespace(&self.field_text(Field::ApiKey, cx));
         self.key_tested.as_ref().is_some_and(|(provider, fingerprint)| {
             *provider == self.draft.provider && *fingerprint == key_fingerprint(&typed)
         })
@@ -7302,7 +7325,7 @@ impl Workbench {
             .iter()
             .filter(|(field, _)| field.is_secret())
             .filter_map(|(field, composer)| {
-                let value = composer.read(cx).text().trim().to_string();
+                let value = strip_whitespace(composer.read(cx).text());
                 if value.is_empty() {
                     return None;
                 }
