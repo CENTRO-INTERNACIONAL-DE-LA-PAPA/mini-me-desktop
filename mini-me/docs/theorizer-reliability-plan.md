@@ -29,6 +29,21 @@ subagent runs it; (2) a React "Maximum update depth exceeded" warning.
   `aexecute_untruncated` (server-side callers parse the output; it never reaches
   the model). Validated end-to-end against a real completed task (8 theories,
   working S2 links); regression tests pin the 32 KB failure mode.
+- **The theory_store IS the theories (2026-11-03, asta CLI 0.116).** The
+  Theorizer stopped emitting per-theory `theory` artifacts. A completed task now
+  carries ONE artifact, `metadata.type == "theory_store"`, whose parts are JSON
+  merge patches (RFC 7396): one part per paper (`paperstore`), per extraction
+  result (`extraction_results`) and per theory (`theories`), each theory with
+  `components.theory_statements[].law.theory_statement` and
+  `supporting_evidence_ids` that resolve `extraction-result-N -> paper_id ->
+  paperstore`. The reducer above dropped that artifact as bulk and the parser
+  kept only `theory` artifacts, so a run of 8 theories persisted as
+  `completed, theories: [], papers_reviewed: 0` (task 66119362-...). *Fix:* the
+  reducer folds the merge patches and forwards a pruned store (statements,
+  evidence ids, paper identities, predictions, ~50 KB for 8 theories; it crosses
+  back through `aexecute_untruncated`, never the 32 KB cap); `_parse_theories`
+  reads both shapes. Verified against two real completed tasks (8 theories
+  each, DOI links); fixtures in `test_theory_tools.py` mirror the record.
 - **Agent-readable theories + real failure reasons (this branch)** — two
   follow-ups after the truncation fix:
   1. *Theories the agent can actually use.* Completed/failed runs are now

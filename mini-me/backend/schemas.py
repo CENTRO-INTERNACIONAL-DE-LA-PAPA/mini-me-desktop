@@ -76,6 +76,14 @@ class PaperRef(BaseModel):
 class Theory(BaseModel):
     """A single literature-grounded theory from the Asta Theorizer."""
 
+    name: str | None = Field(
+        default=None,
+        description="The theorizer's own short name for the theory, when it gave one.",
+    )
+    summary: str | None = Field(
+        default=None,
+        description="The theory in plain language, one or two sentences, as the theorizer wrote it.",
+    )
     laws: List[str] = Field(
         default_factory=list,
         description="Short causal or mechanistic statements, e.g. 'X inhibits Y under condition Z'.",
@@ -94,6 +102,25 @@ class Theory(BaseModel):
     novelty_score: float | None = Field(
         default=None,
         description="Novelty of the theory against the retrieved literature, 0-1 when available.",
+    )
+    novelty_label: str | None = Field(
+        default=None,
+        description=(
+            "The theorizer's own classification against established theory, e.g. "
+            "'somewhat-related-to-existing'. Free, unlike the scored novelty evaluation."
+        ),
+    )
+    related_work: List[str] = Field(
+        default_factory=list,
+        description="Established theories or classic references the theorizer says this builds on.",
+    )
+    predictions: List[str] = Field(
+        default_factory=list,
+        description="What the theory predicts and the literature has not yet tested.",
+    )
+    negative_experiments: List[str] = Field(
+        default_factory=list,
+        description="Experiments whose outcome would refute or shrink the theory.",
     )
 
     @field_validator("supporting_papers", "conflicting_papers", mode="before")
@@ -327,10 +354,16 @@ class PaperRefPayload(TypedDict):
 
 
 class TheoryPayload(TypedDict):
+    name: NotRequired[str | None]
+    summary: NotRequired[str | None]
     laws: list[str]
     supporting_papers: list[PaperRefPayload]
     conflicting_papers: list[PaperRefPayload]
     novelty_score: NotRequired[float | None]
+    novelty_label: NotRequired[str | None]
+    related_work: NotRequired[list[str]]
+    predictions: NotRequired[list[str]]
+    negative_experiments: NotRequired[list[str]]
 
 
 class HypothesisArtifactPayload(TypedDict):
