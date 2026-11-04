@@ -70,7 +70,22 @@
               "contract-hypotheses-theories-0-laws-0",
               "contract-hypotheses-theories-0-laws-1"
             ],
+            "name": "contract-hypotheses-theories-0-name",
+            "negative_experiments": [
+              "contract-hypotheses-theories-0-negative_experiments-0",
+              "contract-hypotheses-theories-0-negative_experiments-1"
+            ],
+            "novelty_label": "contract-hypotheses-theories-0-novelty_label",
             "novelty_score": 0.471,
+            "predictions": [
+              "contract-hypotheses-theories-0-predictions-0",
+              "contract-hypotheses-theories-0-predictions-1"
+            ],
+            "related_work": [
+              "contract-hypotheses-theories-0-related_work-0",
+              "contract-hypotheses-theories-0-related_work-1"
+            ],
+            "summary": "contract-hypotheses-theories-0-summary",
             "supporting_papers": [
               {
                 "citation": "contract-hypotheses-theories-0-supporting_papers-0-citation",
@@ -105,7 +120,22 @@
               "contract-hypotheses-theories-1-laws-0",
               "contract-hypotheses-theories-1-laws-1"
             ],
+            "name": "contract-hypotheses-theories-1-name",
+            "negative_experiments": [
+              "contract-hypotheses-theories-1-negative_experiments-0",
+              "contract-hypotheses-theories-1-negative_experiments-1"
+            ],
+            "novelty_label": "contract-hypotheses-theories-1-novelty_label",
             "novelty_score": 0.472,
+            "predictions": [
+              "contract-hypotheses-theories-1-predictions-0",
+              "contract-hypotheses-theories-1-predictions-1"
+            ],
+            "related_work": [
+              "contract-hypotheses-theories-1-related_work-0",
+              "contract-hypotheses-theories-1-related_work-1"
+            ],
+            "summary": "contract-hypotheses-theories-1-summary",
             "supporting_papers": [
               {
                 "citation": "contract-hypotheses-theories-1-supporting_papers-0-citation",

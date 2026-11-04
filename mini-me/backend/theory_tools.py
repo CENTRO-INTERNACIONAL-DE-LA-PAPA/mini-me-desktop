@@ -17,6 +17,7 @@ authenticated via ``ASTA_TOKEN``), parses the task artifacts into the frontend
 
 import json
 import logging
+import re
 import shlex
 from datetime import datetime, timezone
 from typing import Any
@@ -84,6 +85,192 @@ def _paper_ref(entity: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _paper_ref_from_store(entry: dict[str, Any]) -> dict[str, Any]:
+    """Map a theory_store ``paperstore`` entry to the frontend PaperRef shape.
+
+    The store keeps the paper's identity at the top level (``title``,
+    ``corpus_id``, ``s2_id``) and the Semantic Scholar record under
+    ``s2_metadata`` (snake_case, unlike the legacy ``s2Metadata`` entity).
+    Re-shaped into the legacy entity so `_paper_ref` stays the one place that
+    decides how a paper is linked.
+    """
+    s2 = entry.get("s2_metadata") or {}
+    if not isinstance(s2, dict):
+        s2 = {}
+    title = entry.get("title") or s2.get("title")
+    corpus = entry.get("corpus_id")
+    if corpus in (None, ""):
+        corpus = s2.get("corpusId")
+    return _paper_ref(
+        {
+            "displayLabel": title,
+            "s2Metadata": {**s2, "title": title, "corpusId": corpus},
+        }
+    )
+
+
+def _merge_patch(target: Any, patch: Any) -> Any:
+    """Apply a JSON merge patch (RFC 7396): dicts merge recursively, ``null`` deletes.
+
+    A theory_store artifact declares ``merge_format: json-merge-patch-rfc7396``
+    and arrives as one part per patch — a paper, an extraction result, a theory
+    — so the store is the fold of every part over an empty object.
+    """
+    if not isinstance(patch, dict):
+        return patch
+    if not isinstance(target, dict):
+        target = {}
+    for key, value in patch.items():
+        if value is None:
+            target.pop(key, None)
+        else:
+            target[key] = _merge_patch(target.get(key), value)
+    return target
+
+
+def _theory_store_of(task: dict[str, Any]) -> dict[str, Any]:
+    """Fold every ``theory_store`` artifact's parts into one store dict."""
+    store: dict[str, Any] = {}
+    for art in task.get("artifacts", []) or []:
+        if not isinstance(art, dict):
+            continue
+        if (art.get("metadata") or {}).get("type") != "theory_store":
+            continue
+        for part in art.get("parts", []) or []:
+            data = part.get("data") if isinstance(part, dict) else None
+            if isinstance(data, dict):
+                store = _merge_patch(store, data)
+    return store
+
+
+_EVIDENCE_UUID_RE = re.compile(r"^e(\d+)(?:\.\d+)?$")
+
+
+def _extraction_id_of(evidence_ref: Any) -> str | None:
+    """``"e14.0"`` (a per-statement evidence uuid) -> ``"extraction-result-14"``.
+
+    Theory statements cite evidence by the short uuid the extraction step
+    stamped on each finding; the theory itself lists the full
+    ``extraction-result-N`` ids. Both name the same extraction result.
+    """
+    if not isinstance(evidence_ref, str):
+        return None
+    if evidence_ref.startswith("extraction-result-"):
+        return evidence_ref
+    match = _EVIDENCE_UUID_RE.match(evidence_ref.strip())
+    return f"extraction-result-{match.group(1)}" if match else None
+
+
+def _papers_for_evidence(store: dict[str, Any], refs: list[Any]) -> list[dict[str, Any]]:
+    """Resolve evidence refs -> extraction result -> paper store entry -> PaperRef.
+
+    Order is the theory's own; a paper cited by several findings appears once.
+    """
+    extractions = store.get("extraction_results") or {}
+    papers = store.get("paperstore") or {}
+    seen: set[str] = set()
+    refs_out: list[dict[str, Any]] = []
+    for ref in refs:
+        ext_id = _extraction_id_of(ref)
+        ext = extractions.get(ext_id) if ext_id else None
+        paper_id = ext.get("paper_id") if isinstance(ext, dict) else None
+        if not paper_id or paper_id in seen:
+            continue
+        entry = papers.get(paper_id)
+        if not isinstance(entry, dict):
+            continue
+        seen.add(paper_id)
+        refs_out.append(_paper_ref_from_store(entry))
+    return refs_out
+
+
+def _theory_sort_key(theory_id: str) -> tuple[int, str]:
+    match = re.search(r"(\d+)$", theory_id or "")
+    return (int(match.group(1)) if match else 1 << 30, theory_id or "")
+
+
+def _theories_from_store(store: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Theories + knowledge gaps from a folded theory_store.
+
+    Each theory's laws are its ``theory_statements`` (the statement text, not
+    the name); its papers come from ``supporting_evidence_ids``; papers the
+    theorizer itself flags under ``conflicting_evidence`` become
+    ``conflicting_papers``; and what it says the evidence leaves
+    ``unaccounted_for`` is reported as a knowledge gap. Nothing is inferred
+    from prose.
+    """
+    theories_in = store.get("theories") or {}
+    if not isinstance(theories_in, dict):
+        return [], []
+    theories: list[dict[str, Any]] = []
+    gaps: list[str] = []
+    for theory_id in sorted(theories_in, key=_theory_sort_key):
+        theory = theories_in[theory_id]
+        if not isinstance(theory, dict):
+            continue
+        components = theory.get("components") or {}
+        if not isinstance(components, dict):
+            components = {}
+        laws: list[str] = []
+        novelty: float | None = None
+        for statement in components.get("theory_statements") or []:
+            law = statement.get("law") if isinstance(statement, dict) else None
+            if not isinstance(law, dict):
+                continue
+            text = law.get("theory_statement") or law.get("statement_name")
+            if isinstance(text, str) and text.strip():
+                laws.append(text.strip())
+            score = law.get("novelty_evaluation")
+            if isinstance(score, (int, float)) and not isinstance(score, bool):
+                novelty = float(score) if novelty is None else max(novelty, float(score))
+        name = theory.get("name") or components.get("theory_name")
+        if not laws and isinstance(name, str) and name.strip():
+            laws = [name.strip()]
+        conflicting_refs = [
+            uuid
+            for item in components.get("conflicting_evidence") or []
+            if isinstance(item, dict)
+            for uuid in (item.get("uuids") or [])
+        ]
+        for item in components.get("unaccounted_for") or []:
+            text = item.get("text") if isinstance(item, dict) else None
+            if isinstance(text, str) and text.strip() and text.strip() not in gaps:
+                gaps.append(text.strip())
+        existing = components.get("existing_theory")
+        if not isinstance(existing, dict):
+            existing = {}
+        theories.append(
+            {
+                "name": name.strip() if isinstance(name, str) and name.strip() else None,
+                "summary": _clean_text(components.get("theory_description_plain_language")),
+                "laws": laws,
+                "supporting_papers": _papers_for_evidence(
+                    store, list(theory.get("supporting_evidence_ids") or [])
+                ),
+                "conflicting_papers": _papers_for_evidence(store, conflicting_refs),
+                "novelty_score": novelty,
+                # The theorizer's own, free verdict on how the theory sits against
+                # the canon — e.g. "somewhat-related-to-existing" — and the classic
+                # work it names. Not the paid novelty evaluation, which scores laws.
+                "novelty_label": _clean_text(existing.get("likely_classification")),
+                "related_work": _clean_list(existing.get("references")),
+                "predictions": _clean_list(components.get("new_predictions_likely")),
+                "negative_experiments": _clean_list(components.get("negative_experiments")),
+            }
+        )
+    return theories, gaps
+
+
+def _clean_text(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _clean_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [v.strip() for v in values if isinstance(v, str) and v.strip()]
+
+
 def _laws_from_content(content: list[dict[str, Any]]) -> list[str]:
     """Extract theory statements from the 'Theory Statements' content container."""
     by_id = {c.get("id"): c for c in content}
@@ -106,10 +293,22 @@ def _laws_from_content(content: list[dict[str, Any]]) -> list[str]:
 
 
 def _parse_theories(task: dict[str, Any]) -> dict[str, Any]:
-    """Parse a completed Asta task record into HypothesisOutput field values."""
+    """Parse a completed Asta task record into HypothesisOutput field values.
+
+    Two record shapes are read, because the Theorizer changed its output
+    without a version bump: the legacy one emitted one ``theory`` artifact per
+    theory (a content tree with a "Theory Statements" section and ``entities``
+    for the papers); the current one emits a single ``theory_store`` artifact —
+    a sequence of JSON merge patches carrying the paper store, the extraction
+    results and the theories, which the paper-finding and extraction stages
+    also write to. The deployed bug was reading only the first: a completed run
+    of eight theories came back as a completed run of none.
+    """
     theories: list[dict[str, Any]] = []
     paper_ids: set[str] = set()
-    for art in task.get("artifacts", []):
+    for art in task.get("artifacts", []) or []:
+        if not isinstance(art, dict):
+            continue
         if art.get("metadata", {}).get("type") != "theory":
             continue
         try:
@@ -125,18 +324,43 @@ def _parse_theories(task: dict[str, Any]) -> dict[str, Any]:
             supporting.append(_paper_ref(ent))
         theories.append(
             {
+                "name": data.get("name") or None,
+                "summary": None,
                 "laws": laws,
                 "supporting_papers": supporting,
-                # The theorizer surfaces conflicting evidence as prose, not as a
-                # per-paper split, so we do not fabricate a partition here.
+                # The legacy record surfaces conflicting evidence as prose, not
+                # as a per-paper split, so we do not fabricate a partition here.
                 "conflicting_papers": [],
                 "novelty_score": None,
+                "novelty_label": None,
+                "related_work": [],
+                "predictions": [],
+                "negative_experiments": [],
             }
         )
+    store = _theory_store_of(task)
+    store_theories, gaps = _theories_from_store(store)
+    theories.extend(store_theories)
+    # "Papers reviewed" is what the pipeline extracted from. The store says so
+    # directly (one extraction result per paper read); the legacy record only
+    # tells us which papers a theory ended up citing.
+    extractions = store.get("extraction_results") or {}
+    if isinstance(extractions, dict) and extractions:
+        reviewed = {
+            ext.get("paper_id")
+            for ext in extractions.values()
+            if isinstance(ext, dict) and ext.get("paper_id")
+        }
+        papers_reviewed = len(reviewed)
+    else:
+        for theory in store_theories:
+            for paper in theory["supporting_papers"]:
+                paper_ids.add(paper.get("corpus_id") or paper.get("citation"))
+        papers_reviewed = len(paper_ids)
     return {
         "theories": theories,
-        "knowledge_gaps": [],
-        "papers_reviewed": len(paper_ids),
+        "knowledge_gaps": gaps,
+        "papers_reviewed": papers_reviewed,
     }
 
 
@@ -168,10 +392,14 @@ def _run_elapsed_seconds(task: dict[str, Any] | None) -> int | None:
 # record is ~500 KB — it embeds the full paper store and per-paper extraction
 # markdown — which blows past the sandbox execute truncation cap and lands as
 # unparseable JSON (the bug that left the Theories card "generating" forever).
-# We only need the task state and the `theory` artifacts, so prune everything
-# else (theory_store, extractions, paperstore) and trim each theory to the
-# fields the client-side parser reads (name, section titles, and paper refs)
-# BEFORE the payload crosses back. The output is the same reduced-task shape
+# We only need the task state and the theories, so prune everything else
+# (extraction schemas, per-paper markdown, extracted data) and trim each
+# theory to the fields the client-side parser reads BEFORE the payload
+# crosses back. Legacy `theory` artifacts keep name, section titles and paper
+# refs; a `theory_store` artifact (the current shape: merge patches holding
+# the paper store, extraction results and theories together) is folded and
+# cut down to statements, evidence ids, and the paper identities those ids
+# resolve to. The output is the same reduced-task shape
 # `_parse_theories`/`_state_of` already consume, so the parser stays the single
 # source of truth. Kept apostrophe-free so it survives shell single-quoting.
 _REDUCE_TASK_PY = """
@@ -202,6 +430,73 @@ for a in t.get("artifacts", []) or []:
         "name": d.get("name"),
         "content": tc(d.get("content", []) or []),
         "entities": {k: te(v) for k, v in (d.get("entities", {}) or {}).items()},
+    }}]})
+def mp(t, p):
+    if not isinstance(p, dict):
+        return p
+    if not isinstance(t, dict):
+        t = {}
+    for k, v in p.items():
+        if v is None:
+            t.pop(k, None)
+        else:
+            t[k] = mp(t.get(k), v)
+    return t
+store = {}
+for a in t.get("artifacts", []) or []:
+    if (a.get("metadata") or {}).get("type") != "theory_store":
+        continue
+    for p in a.get("parts", []) or []:
+        d = p.get("data") if isinstance(p, dict) else None
+        if isinstance(d, dict):
+            store = mp(store, d)
+ths = store.get("theories")
+if isinstance(ths, dict) and ths:
+    def ts(s):
+        law = (s.get("law") or {}) if isinstance(s, dict) else {}
+        nov = law.get("novelty_evaluation")
+        if isinstance(nov, bool) or not isinstance(nov, (int, float)):
+            nov = None
+        return {"law": {"statement_name": law.get("statement_name"),
+                        "theory_statement": law.get("theory_statement"),
+                        "novelty_evaluation": nov}}
+    def tv(items):
+        return [{"text": i.get("text"), "uuids": i.get("uuids")}
+                for i in (items or []) if isinstance(i, dict)]
+    def tt(th):
+        c = th.get("components") or {}
+        if not isinstance(c, dict):
+            c = {}
+        ex = c.get("existing_theory")
+        if not isinstance(ex, dict):
+            ex = {}
+        return {"id": th.get("id"), "name": th.get("name"),
+                "supporting_evidence_ids": th.get("supporting_evidence_ids"),
+                "components": {
+                    "theory_name": c.get("theory_name"),
+                    "theory_description_plain_language": c.get("theory_description_plain_language"),
+                    "theory_statements": [ts(s) for s in (c.get("theory_statements") or [])],
+                    "conflicting_evidence": tv(c.get("conflicting_evidence")),
+                    "unaccounted_for": tv(c.get("unaccounted_for")),
+                    "new_predictions_likely": c.get("new_predictions_likely"),
+                    "negative_experiments": c.get("negative_experiments"),
+                    "existing_theory": {"likely_classification": ex.get("likely_classification"),
+                                        "references": ex.get("references")}}}
+    def tp(e):
+        s = e.get("s2_metadata") or {}
+        if not isinstance(s, dict):
+            s = {}
+        return {"id": e.get("id"), "title": e.get("title"), "corpus_id": e.get("corpus_id"),
+                "s2_id": e.get("s2_id"),
+                "s2_metadata": {"title": s.get("title"), "corpusId": s.get("corpusId"),
+                                "externalIds": s.get("externalIds"), "url": s.get("url")}}
+    ex = store.get("extraction_results") or {}
+    ps = store.get("paperstore") or {}
+    arts.append({"metadata": {"type": "theory_store"}, "parts": [{"data": {
+        "theories": {k: tt(v) for k, v in ths.items() if isinstance(v, dict)},
+        "extraction_results": {k: {"paper_id": v.get("paper_id")}
+                               for k, v in ex.items() if isinstance(v, dict)},
+        "paperstore": {k: tp(v) for k, v in ps.items() if isinstance(v, dict)},
     }}]})
 out = {"status": st, "artifacts": arts}
 if st.get("state") != "completed":
@@ -373,14 +668,41 @@ def theories_markdown(question: str, result: dict[str, Any]) -> str:
     ]
     for i, theory in enumerate(theories, 1):
         laws = theory.get("laws") or []
-        lines.append(f"## Theory {i}")
+        name = theory.get("name")
+        lines.append(f"## Theory {i}: {name}" if name else f"## Theory {i}")
+        if theory.get("summary"):
+            lines.append(f"_{theory['summary']}_")
+            lines.append("")
         for law in laws:
             lines.append(f"- {law}")
-        supporting = theory.get("supporting_papers") or []
-        if supporting:
+        label = theory.get("novelty_label")
+        related = theory.get("related_work") or []
+        if label or related:
             lines.append("")
-            lines.append("**Supporting papers**")
-            for paper in supporting:
+            lines.append(
+                f"**Against existing theory:** {label.replace('-', ' ')}" if label
+                else "**Related existing theory**"
+            )
+            lines.extend(f"- {ref}" for ref in related)
+        for heading, key in (
+            ("**Predictions**", "predictions"),
+            ("**Experiments that would refute it**", "negative_experiments"),
+        ):
+            items = theory.get(key) or []
+            if items:
+                lines.append("")
+                lines.append(heading)
+                lines.extend(f"- {item}" for item in items)
+        for heading, key in (
+            ("**Supporting papers**", "supporting_papers"),
+            ("**Conflicting or complicating evidence**", "conflicting_papers"),
+        ):
+            papers = theory.get(key) or []
+            if not papers:
+                continue
+            lines.append("")
+            lines.append(heading)
+            for paper in papers:
                 citation = paper.get("citation") or "Untitled reference"
                 url = paper.get("url")
                 lines.append(f"- [{citation}]({url})" if url else f"- {citation}")

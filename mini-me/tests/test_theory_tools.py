@@ -503,3 +503,279 @@ def test_persist_is_noop_without_awrite() -> None:
                                "Q", _COMPLETED_RESULT)
     )
     assert written == []
+
+
+# ---------------------------------------------------------------------------
+# The current Theorizer output: ONE `theory_store` artifact made of JSON merge
+# patches (RFC 7396) — the paper store, the extraction results and the theories
+# all land in it, one part each — and NO per-theory `theory` artifacts. The old
+# parser kept only `theory` artifacts and the reducer dropped the store as bulk,
+# so a completed run of eight theories persisted as "completed, 0 theories, 0
+# papers reviewed" (the real record this fixture mirrors).
+# ---------------------------------------------------------------------------
+
+from backend.theory_tools import (
+    _extraction_id_of,
+    _merge_patch,
+    _theory_store_of,
+)
+
+
+def _store_part(data: dict) -> dict:
+    return {"kind": "data", "metadata": {"contentType": "application/vnd.asta.theory_store+json"},
+            "data": data}
+
+
+def _store_theory(num: int, name: str, statements: list[str], evidence: list[str],
+                  conflicting_uuids: list[str] | None = None,
+                  unaccounted: list[str] | None = None,
+                  plain: str | None = None,
+                  predictions: list[str] | None = None,
+                  negative: list[str] | None = None,
+                  existing: dict | None = None) -> dict:
+    return {
+        "id": f"theory-{num}",
+        "name": name,
+        "type": "general",
+        "supporting_evidence_ids": evidence,
+        "components": {
+            "theory_name": name,
+            "theory_description_plain_language": plain,
+            "new_predictions_likely": predictions or [],
+            "negative_experiments": negative or [],
+            "existing_theory": existing,
+            "theory_statements": [
+                {"law": {"statement_name": f"Law {i}", "theory_statement": s,
+                         "supporting_evidence": [], "novelty_evaluation": None}}
+                for i, s in enumerate(statements, 1)
+            ],
+            "conflicting_evidence": [
+                {"text": "complicates the chain", "uuids": conflicting_uuids or []}
+            ] if conflicting_uuids else [],
+            "unaccounted_for": [{"text": t, "uuids": []} for t in (unaccounted or [])],
+        },
+    }
+
+
+def _theory_store_task(*, bulk: str = "") -> dict:
+    """A completed task shaped like the real `theory_store` record.
+
+    Parts arrive in pipeline order — schema, papers, extractions, theories, index
+    — and the paper parts carry `null` fields (merge-patch deletes), as the real
+    ones do. `bulk` pads the per-paper markdown and extracted data to stand in
+    for the hundreds of KB a real store carries.
+    """
+    paper_a = {"id": "paper-aaa", "status": "full-text", "s2_id": "aaa", "corpus_id": "246743002",
+               "title": "Planting dates and late blight in Southern Ethiopia",
+               "publication_year": 2021, "publication_month": None,
+               "s2_metadata": {"corpusId": 246743002, "externalIds": {"DOI": "10.31248/jasp2020.243"},
+                               "url": "https://www.semanticscholar.org/paper/aaa",
+                               "title": "Planting dates and late blight in Southern Ethiopia"},
+               "paper_markdown": bulk or "# Paper A", "fetch_channel": None, "license_class": None}
+    paper_b = {"id": "paper-bbb", "status": "metadata-only", "s2_id": "bbb", "corpus_id": "99",
+               "title": "ENSO impacts on East African rainfall", "publication_year": 2019,
+               "publication_month": None, "s2_metadata": {"corpusId": 99, "externalIds": {"CorpusId": 99}},
+               "paper_markdown": None, "fetch_channel": None}
+    paper_c = {"id": "paper-ccc", "status": "full-text", "s2_id": "ccc", "corpus_id": "7",
+               "title": "A paper that was read but cited by no theory",
+               "s2_metadata": {"corpusId": 7}, "paper_markdown": bulk or "# Paper C"}
+    parts = [
+        _store_part({"extraction_schemas": {"extraction-schema-1": {"id": "extraction-schema-1",
+                                                                    "schema": [], "extraction_query": bulk or "q"}}}),
+        _store_part({"paperstore": {"paper-aaa": paper_a}, "paperstore_lut": {"paper-aaa": "paper-aaa"}}),
+        _store_part({"paperstore": {"paper-bbb": paper_b}, "paperstore_lut": {"paper-bbb": "paper-bbb"}}),
+        _store_part({"paperstore": {"paper-ccc": paper_c}, "paperstore_lut": {"paper-ccc": "paper-ccc"}}),
+        _store_part({"extraction_results": {"extraction-result-1": {
+            "id": "extraction-result-1", "paper_id": "paper-aaa", "extraction_schema_id": "extraction-schema-1",
+            "extracted_data": bulk or "[{...}]", "cost": "0.001"}}}),
+        _store_part({"extraction_results": {"extraction-result-2": {
+            "id": "extraction-result-2", "paper_id": "paper-bbb", "extracted_data": bulk or "[]"}}}),
+        _store_part({"extraction_results": {"extraction-result-3": {
+            "id": "extraction-result-3", "paper_id": "paper-ccc", "extracted_data": bulk or "[]"}}}),
+        # Theories arrive out of numeric order on purpose; the parser must sort.
+        _store_part({"theories": {"theory-2": _store_theory(
+            2, "Management-capacity threshold theory",
+            ["Fungicide timing gates whether an epidemic is controllable"],
+            ["extraction-result-1"])}}),
+        _store_part({"theories": {"theory-1": _store_theory(
+            1, "ENSO moisture–phenology alignment theory",
+            ["Blight intensity rises when wet spells overlap canopy expansion",
+             "Early planting lets tubers bulk before the wettest window"],
+            ["extraction-result-1", "extraction-result-2", "extraction-result-1"],
+            conflicting_uuids=["e1.0"],
+            unaccounted=["Trials are single-season and never measured ENSO indices"],
+            plain="El Niño changes when the rains come; blight follows the rains.",
+            predictions=["In El Niño years with late rains, blight onset is later and AUDPC lower"],
+            negative=["Add ENSO indices to a multi-year model; if they add nothing, drop the ENSO part"],
+            existing={"likely_classification": "somewhat-related-to-existing",
+                      "references": ["van der Plank (1963) Plant Diseases: Epidemics and Control"],
+                      "what_already_exists": "weather-disease coupling"})}}),
+        _store_part({"all_ids": ["theory-1", "theory-2"], "next_ids": {"theory": 2},
+                     "short_name": "el-nino-potato-lateblight"}),
+    ]
+    return {
+        "id": "66119362-6d3d-48d3-a53f-a652f5332d6a",
+        "status": {"state": "completed",
+                   "message": {"parts": [{"kind": "text", "text": "Generated 2 theories using 4 credits"}]}},
+        "artifacts": [{
+            "artifactId": "gen-1-theory-store-raw", "name": "Theory Store",
+            "metadata": {"type": "theory_store", "merge_format": "json-merge-patch-rfc7396",
+                         "schema_version": "1"},
+            "parts": parts,
+        }],
+    }
+
+
+def test_merge_patch_merges_nested_and_deletes_on_null() -> None:
+    store = _merge_patch({}, {"paperstore": {"p1": {"title": "A", "status": "x"}}})
+    store = _merge_patch(store, {"paperstore": {"p2": {"title": "B"}}})
+    store = _merge_patch(store, {"paperstore": {"p1": {"status": None, "year": 2020}}})
+    assert set(store["paperstore"]) == {"p1", "p2"}
+    assert store["paperstore"]["p1"] == {"title": "A", "year": 2020}
+    # A non-object patch replaces outright (RFC 7396).
+    assert _merge_patch({"a": {"b": 1}}, {"a": [1, 2]}) == {"a": [1, 2]}
+
+
+def test_extraction_id_of_maps_statement_uuids_to_extraction_results() -> None:
+    assert _extraction_id_of("e14.0") == "extraction-result-14"
+    assert _extraction_id_of("e3") == "extraction-result-3"
+    assert _extraction_id_of("extraction-result-7") == "extraction-result-7"
+    assert _extraction_id_of("paper-abc") is None
+    assert _extraction_id_of(None) is None
+
+
+def test_theory_store_of_folds_every_part() -> None:
+    store = _theory_store_of(_theory_store_task())
+    assert set(store["paperstore"]) == {"paper-aaa", "paper-bbb", "paper-ccc"}
+    assert set(store["extraction_results"]) == {"extraction-result-1", "extraction-result-2",
+                                                "extraction-result-3"}
+    assert set(store["theories"]) == {"theory-1", "theory-2"}
+    # Null fields were dropped rather than kept as None.
+    assert "publication_month" not in store["paperstore"]["paper-aaa"]
+
+
+def test_parse_theories_reads_theory_store_record() -> None:
+    out = _parse_theories(_theory_store_task())
+    assert [t["name"] for t in out["theories"]] == [
+        "ENSO moisture–phenology alignment theory",
+        "Management-capacity threshold theory",
+    ]
+    t1, t2 = out["theories"]
+    # Laws are the statements themselves, in order.
+    assert t1["laws"] == [
+        "Blight intensity rises when wet spells overlap canopy expansion",
+        "Early planting lets tubers bulk before the wettest window",
+    ]
+    # Evidence ids resolve through the extraction results to the paper store,
+    # deduplicated, in the theory's own order, linked by DOI when there is one
+    # and by corpus id otherwise.
+    assert [p["citation"] for p in t1["supporting_papers"]] == [
+        "Planting dates and late blight in Southern Ethiopia",
+        "ENSO impacts on East African rainfall",
+    ]
+    assert t1["supporting_papers"][0]["url"] == "https://doi.org/10.31248/jasp2020.243"
+    assert t1["supporting_papers"][0]["doi"] == "10.31248/jasp2020.243"
+    assert t1["supporting_papers"][0]["corpus_id"] == "246743002"
+    assert t1["supporting_papers"][1]["url"] == "https://api.semanticscholar.org/CorpusID:99"
+    # Conflicting evidence the theorizer itself flagged (by statement uuid) is
+    # surfaced; nothing is inferred from prose.
+    assert [p["citation"] for p in t1["conflicting_papers"]] == [
+        "Planting dates and late blight in Southern Ethiopia"
+    ]
+    assert t2["conflicting_papers"] == []
+    assert t2["supporting_papers"][0]["doi"] == "10.31248/jasp2020.243"
+    assert t1["novelty_score"] is None
+    # The parts of a theory the card does not draw but the agent reads later:
+    # the plain-language summary, what it predicts, what would refute it, and
+    # the theorizer's own (free) verdict against established theory.
+    assert t1["summary"] == "El Niño changes when the rains come; blight follows the rains."
+    assert t1["predictions"] == [
+        "In El Niño years with late rains, blight onset is later and AUDPC lower"
+    ]
+    assert t1["negative_experiments"] == [
+        "Add ENSO indices to a multi-year model; if they add nothing, drop the ENSO part"
+    ]
+    assert t1["novelty_label"] == "somewhat-related-to-existing"
+    assert t1["related_work"] == ["van der Plank (1963) Plant Diseases: Epidemics and Control"]
+    # A theory the theorizer gave none of that for reports empty, not missing.
+    assert t2["summary"] is None and t2["novelty_label"] is None
+    assert t2["predictions"] == [] and t2["negative_experiments"] == [] and t2["related_work"] == []
+    assert out["knowledge_gaps"] == ["Trials are single-season and never measured ENSO indices"]
+    # Every paper the pipeline extracted from counts, cited by a theory or not.
+    assert out["papers_reviewed"] == 3
+
+
+def test_parse_theories_store_falls_back_to_name_without_statements() -> None:
+    task = _theory_store_task()
+    bare = _store_theory(3, "A nameless-law theory", [], [])
+    task["artifacts"][0]["parts"].append(_store_part({"theories": {"theory-3": bare}}))
+    out = _parse_theories(task)
+    assert out["theories"][-1]["laws"] == ["A nameless-law theory"]
+
+
+def test_parse_theories_reads_legacy_and_store_records_together() -> None:
+    task = _theory_store_task()
+    task["artifacts"].append(_theory_artifact(
+        "Legacy theory", ["X causes Y"],
+        [{"displayLabel": "Doe 2020", "s2Metadata": {"corpusId": 12345}}]))
+    out = _parse_theories(task)
+    assert out["theories"][0]["name"] == "Legacy theory"
+    assert len(out["theories"]) == 3
+
+
+def test_reducer_keeps_theory_store_theories_and_drops_its_bulk() -> None:
+    bulk = "x" * 200_000
+    task = _theory_store_task(bulk=bulk)
+    raw = json.dumps(task)
+    assert len(raw.encode()) > EXECUTE_OUTPUT_MAX_BYTES
+    reduced_out = _run_reducer(task)
+    assert len(reduced_out.encode()) < EXECUTE_OUTPUT_MAX_BYTES
+    assert "paper_markdown" not in reduced_out
+    assert "extracted_data" not in reduced_out
+    assert "extraction_schemas" not in reduced_out
+    reduced = _extract_json(reduced_out)
+    assert _state_of(reduced) == "completed"
+    # The reduced record parses to exactly what the full record parses to: the
+    # client-side parser stays the single source of truth.
+    assert _parse_theories(reduced) == _parse_theories(task)
+    assert len(_parse_theories(reduced)["theories"]) == 2
+
+
+def test_reducer_drops_a_theory_store_with_no_theories() -> None:
+    # A store that only got as far as papers (a mid-run crash, or the legacy
+    # layout where the store was bulk beside separate `theory` artifacts)
+    # forwards nothing — the legacy expectation in the giant-task test.
+    task = _theory_store_task()
+    task["artifacts"][0]["parts"] = [p for p in task["artifacts"][0]["parts"]
+                                     if "theories" not in p["data"]]
+    reduced = _extract_json(_run_reducer(task))
+    assert reduced["artifacts"] == []
+
+
+def test_poll_theory_status_completed_parses_theory_store() -> None:
+    sb = _FakeSandbox(json.dumps(_theory_store_task()))
+    res = asyncio.run(poll_theory_status(sb, "66119362-6d3d-48d3-a53f-a652f5332d6a"))
+    assert res["status"] == "completed"
+    assert len(res["theories"]) == 2
+    assert res["papers_reviewed"] == 3
+
+
+def test_theories_markdown_names_theories_and_lists_conflicting_papers() -> None:
+    result = {"status": "completed", **_parse_theories(_theory_store_task())}
+    md = theories_markdown("How does El Niño affect late blight?", result)
+    assert "## Theory 1: ENSO moisture–phenology alignment theory" in md
+    assert "## Theory 2: Management-capacity threshold theory" in md
+    assert "- Blight intensity rises when wet spells overlap canopy expansion" in md
+    assert "[Planting dates and late blight in Southern Ethiopia](https://doi.org/10.31248/jasp2020.243)" in md
+    assert "**Conflicting or complicating evidence**" in md
+    assert "## Knowledge gaps" in md
+    assert "2 theories, 3 papers reviewed" in md
+    assert "_El Niño changes when the rains come; blight follows the rains._" in md
+    assert "**Against existing theory:** somewhat related to existing" in md
+    assert "- van der Plank (1963) Plant Diseases: Epidemics and Control" in md
+    assert "**Predictions**" in md
+    assert "- In El Niño years with late rains, blight onset is later and AUDPC lower" in md
+    assert "**Experiments that would refute it**" in md
+    # The theory without any of it renders laws and papers only.
+    second = md.split("## Theory 2")[1]
+    assert "Predictions" not in second and "existing theory" not in second
