@@ -45,19 +45,19 @@ the resulting evidence and files came from.
 The live backend currently defines eleven specialists. The desktop reads their names and
 descriptions from the backend registry instead of maintaining a separate hardcoded UI list.
 
-| Specialist | Responsibility |
-|---|---|
-| `research_planner` | Writes a concise, ordered investigation plan for the researcher to review. Planning does not execute the work. |
-| `academic_researcher` | Searches scientific literature with Asta, synthesizes evidence, and returns citations and stable links. |
-| `dataverse_explorer` | Searches CIP Dataverse, reads complete result metadata, and recommends datasets with persistent identifiers. |
-| `pdf_librarian` | Extracts and indexes the researcher's PDFs into a conversation-specific semantic library and searches it by meaning. |
-| `data_cleaning` | Validates schemas, identifies data-quality problems, harmonizes terminology, and writes cleaned versions without replacing raw files. |
-| `exploratory_data_analysis` | Profiles and summarizes data, examines missingness and outliers, and creates explanatory visualizations. |
-| `diagnostic_analytics` | Investigates why an outcome occurred using comparisons, regression, inference, confounder checks, and causal framing. |
-| `predictive_analytics` | Selects, trains, validates, and compares machine-learning, forecasting, deep-learning, and Bayesian models. |
-| `hypothesis_generator` | Uses the Asta Theorizer pipeline to generate literature-grounded mechanisms, theories, and open questions. |
-| `autodiscovery` | Drafts an open-ended Asta exploration that generates and tests hypotheses over a dataset. The researcher approves its experiment budget before it runs. |
-| `report_writer` | Synthesizes findings, methods, limitations, recommendations, and references into a complete report. |
+| Specialist                  | Responsibility                                                                                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `research_planner`          | Writes a concise, ordered investigation plan for the researcher to review. Planning does not execute the work.                                          |
+| `academic_researcher`       | Searches scientific literature with Asta, synthesizes evidence, and returns citations and stable links.                                                 |
+| `dataverse_explorer`        | Searches CIP Dataverse, reads complete result metadata, and recommends datasets with persistent identifiers.                                            |
+| `pdf_librarian`             | Extracts and indexes the researcher's PDFs into a conversation-specific semantic library and searches it by meaning.                                    |
+| `data_cleaning`             | Validates schemas, identifies data-quality problems, harmonizes terminology, and writes cleaned versions without replacing raw files.                   |
+| `exploratory_data_analysis` | Profiles and summarizes data, examines missingness and outliers, and creates explanatory visualizations.                                                |
+| `diagnostic_analytics`      | Investigates why an outcome occurred using comparisons, regression, inference, confounder checks, and causal framing.                                   |
+| `predictive_analytics`      | Selects, trains, validates, and compares machine-learning, forecasting, deep-learning, and Bayesian models.                                             |
+| `hypothesis_generator`      | Uses the Asta Theorizer pipeline to generate literature-grounded mechanisms, theories, and open questions.                                              |
+| `autodiscovery`             | Drafts an open-ended Asta exploration that generates and tests hypotheses over a dataset. The researcher approves its experiment budget before it runs. |
+| `report_writer`             | Synthesizes findings, methods, limitations, recommendations, and references into a complete report.                                                     |
 
 ## Desktop experience
 
@@ -159,12 +159,12 @@ capability, and oversized results are saved into the active conversation workspa
 filling the model context. Modern MCP form and URL elicitation pauses are shown to the researcher
 and may be accepted, declined, or cancelled before the tool continues.
 
-| MCP server | Endpoint | Used by | Purpose and exposed scope |
-|---|---|---|---|
-| **Asta** | `https://asta-tools.allen.ai/mcp/v1` | `academic_researcher` | Scientific literature search and passage retrieval. Authenticated with an Asta API key. |
-| **CIP Dataverse** | Bundled `backend/dataverse_mcp/server.py` (stdio) | `dataverse_explorer` | Dataset search, complete search-result reading, and dataset-file listing. The agent is restricted to `SearchCIPDataverse`, `read_search_results`, and `list_dataset_files`; it does not receive curation tools. |
-| **AGROVOC** | `https://agrovoc.fastmcp.app/mcp` | `data_cleaning` | Agricultural vocabulary lookup and terminology normalization. |
-| **Crop Ontology** | `https://CropOntology.fastmcp.app/mcp` | `data_cleaning` | Crop trait, genotype, and phenotype terminology and mappings. |
+| MCP server        | Endpoint                                          | Used by               | Purpose and exposed scope                                                                                                                                                                                       |
+| ----------------- | ------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Asta**          | `https://asta-tools.allen.ai/mcp/v1`              | `academic_researcher` | Scientific literature search and passage retrieval. Authenticated with an Asta API key.                                                                                                                         |
+| **CIP Dataverse** | Bundled `backend/dataverse_mcp/server.py` (stdio) | `dataverse_explorer`  | Dataset search, complete search-result reading, and dataset-file listing. The agent is restricted to `SearchCIPDataverse`, `read_search_results`, and `list_dataset_files`; it does not receive curation tools. |
+| **AGROVOC**       | `https://agrovoc.fastmcp.app/mcp`                 | `data_cleaning`       | Agricultural vocabulary lookup and terminology normalization.                                                                                                                                                   |
+| **Crop Ontology** | `https://CropOntology.fastmcp.app/mcp`            | `data_cleaning`       | Crop trait, genotype, and phenotype terminology and mappings.                                                                                                                                                   |
 
 ### Bundled Dataverse MCP
 
@@ -205,18 +205,18 @@ exposed through those MCP tools:
 
 ## External services
 
-| Service | Why it is used | When data leaves the machine |
-|---|---|---|
-| **LLM providers** | Reasoning and language generation. OpenAI, Anthropic, Google, Mistral, and custom OpenAI-compatible gateways are supported. | When a conversation or specialist run is submitted. The user supplies the provider credentials. |
-| **Asta / Allen Institute for AI** | Literature tools, Semantic Scholar records, PDF OCR, document embeddings, theory generation, and AutoDiscovery. | Only when an Asta-backed specialist or command is used. Some operations consume Asta credits and require approval. |
-| **CIP Dataverse (via local MCP)** | The local server searches CIP's dataset catalogue and retrieves dataset/file metadata over the network. | When the Dataverse Explorer runs. |
-| **AGROVOC and Crop Ontology MCPs** | Resolve and normalize agricultural and crop terminology. | When the Data Cleaner requests ontology assistance. |
-| **Semantic Scholar and arXiv** | Stable paper records and open-access PDF locations. These are normally reached through Asta; the PDF Librarian can download an identified open-access PDF URL. | When literature is resolved or an open-access paper is explicitly fetched. Paywalled material is not bypassed. |
-| **Crossref** | Checks whether a DOI resolves to the paper named by a citation and can search for a likely registered DOI. | The desktop sends a DOI, or citation text when repairing a missing/mismatched identifier. It does not send the research question or uploaded files. |
-| **LangGraph / LangSmith** | Agent graph execution, threads, state, streaming, and the optional remote sandbox/production deployment. | Local desktop development uses a local LangGraph server. Data reaches LangSmith when remote sandbox, hosted deployment, or tracing is enabled. |
-| **WorkOS** | Authentication and encrypted per-user credential storage for the hosted web deployment. | Used in production web/Vault mode. The desktop instead stores model keys in the OS keychain. |
-| **Amazon S3 and CloudFront** | Optional deployment target for the React web client. | Only for the separately deployed web frontend; not required by the desktop client. |
-| **GitHub Releases** | Publishes and checks digest-verified desktop release bundles. | The desktop checks the repository's latest-release endpoint; research data is not sent. |
+| Service                            | Why it is used                                                                                                                                                 | When data leaves the machine                                                                                                                        |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **LLM providers**                  | Reasoning and language generation. OpenAI, Anthropic, Google, Mistral, and custom OpenAI-compatible gateways are supported.                                    | When a conversation or specialist run is submitted. The user supplies the provider credentials.                                                     |
+| **Asta / Allen Institute for AI**  | Literature tools, Semantic Scholar records, PDF OCR, document embeddings, theory generation, and AutoDiscovery.                                                | Only when an Asta-backed specialist or command is used. Some operations consume Asta credits and require approval.                                  |
+| **CIP Dataverse (via local MCP)**  | The local server searches CIP's dataset catalogue and retrieves dataset/file metadata over the network.                                                        | When the Dataverse Explorer runs.                                                                                                                   |
+| **AGROVOC and Crop Ontology MCPs** | Resolve and normalize agricultural and crop terminology.                                                                                                       | When the Data Cleaner requests ontology assistance.                                                                                                 |
+| **Semantic Scholar and arXiv**     | Stable paper records and open-access PDF locations. These are normally reached through Asta; the PDF Librarian can download an identified open-access PDF URL. | When literature is resolved or an open-access paper is explicitly fetched. Paywalled material is not bypassed.                                      |
+| **Crossref**                       | Checks whether a DOI resolves to the paper named by a citation and can search for a likely registered DOI.                                                     | The desktop sends a DOI, or citation text when repairing a missing/mismatched identifier. It does not send the research question or uploaded files. |
+| **LangGraph / LangSmith**          | Agent graph execution, threads, state, streaming, and the optional remote sandbox/production deployment.                                                       | Local desktop development uses a local LangGraph server. Data reaches LangSmith when remote sandbox, hosted deployment, or tracing is enabled.      |
+| **WorkOS**                         | Authentication and encrypted per-user credential storage for the hosted web deployment.                                                                        | Used in production web/Vault mode. The desktop instead stores model keys in the OS keychain.                                                        |
+| **Amazon S3 and CloudFront**       | Optional deployment target for the React web client.                                                                                                           | Only for the separately deployed web frontend; not required by the desktop client.                                                                  |
+| **GitHub Releases**                | Publishes and checks digest-verified desktop release bundles.                                                                                                  | The desktop checks the repository's latest-release endpoint; research data is not sent.                                                             |
 
 Researcher-provided PDFs and tabular files are another primary data source, but they are inputs
 rather than an external service. In local mode they remain in the conversation workspace except
@@ -225,7 +225,7 @@ for the selected model request and any explicitly invoked external analysis or s
 Literature search is powered by Asta from the Allen Institute for AI. Work that uses Asta output
 should cite:
 
-> *AstaBench: Rigorous Benchmarking of AI Agents with a Scientific Research Suite.*
+> _AstaBench: Rigorous Benchmarking of AI Agents with a Scientific Research Suite._
 > arXiv:2510.21652.
 
 ## Safety, privacy, and spending
@@ -308,16 +308,16 @@ human credit-approval gate.
 
 ## Technology stack
 
-| Layer | Languages and principal components |
-|---|---|
-| **Desktop client** | Rust 2021, GPUI 0.2.2, Tokio, Reqwest, Serde, and the native Windows credential manager through `keyring`. |
-| **Agent backend** | Python 3.12+, LangGraph API/SDK, LangChain, Deep Agents, Starlette, and Pydantic structured responses. |
-| **Optional web client** | TypeScript 5.9, React 19, Vite 7, LangChain React, and WorkOS AuthKit. |
-| **Data science** | pandas, NumPy, SciPy, scikit-learn, statsmodels, PyMC, PreliZ, DABEST, XGBoost, UMAP, pointblank, missingno, Matplotlib, and Seaborn. |
-| **Documents and reports** | Markdown, `pypandoc-binary`, Typst, PDF extraction/OCR, and BibTeX/reference rendering. |
-| **Protocols** | HTTP/JSON, Server-Sent Events for live agent output, MCP over HTTP for external tools, and local CLI/subprocess execution. |
-| **Persistence formats** | LangGraph thread/checkpoint state, JSON artifacts, YAML indexes, Markdown reports, SQLite search/index caches, and ordinary files in the conversation workspace. |
-| **Build and operations** | Cargo/Rust tooling, `uv` for Python environments, npm for the optional web client, Bash/Git Bash, PowerShell, GitHub Actions, and Windows SDK shader compilation. |
+| Layer                     | Languages and principal components                                                                                                                                |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Desktop client**        | Rust 2021, GPUI 0.2.2, Tokio, Reqwest, Serde, and the native Windows credential manager through `keyring`.                                                        |
+| **Agent backend**         | Python 3.12+, LangGraph API/SDK, LangChain, Deep Agents, Starlette, and Pydantic structured responses.                                                            |
+| **Optional web client**   | TypeScript 5.9, React 19, Vite 7, LangChain React, and WorkOS AuthKit.                                                                                            |
+| **Data science**          | pandas, NumPy, SciPy, scikit-learn, statsmodels, PyMC, PreliZ, DABEST, XGBoost, UMAP, pointblank, missingno, Matplotlib, and Seaborn.                             |
+| **Documents and reports** | Markdown, `pypandoc-binary`, Typst, PDF extraction/OCR, and BibTeX/reference rendering.                                                                           |
+| **Protocols**             | HTTP/JSON, Server-Sent Events for live agent output, MCP over HTTP for external tools, and local CLI/subprocess execution.                                        |
+| **Persistence formats**   | LangGraph thread/checkpoint state, JSON artifacts, YAML indexes, Markdown reports, SQLite search/index caches, and ordinary files in the conversation workspace.  |
+| **Build and operations**  | Cargo/Rust tooling, `uv` for Python environments, npm for the optional web client, Bash/Git Bash, PowerShell, GitHub Actions, and Windows SDK shader compilation. |
 
 ## Settings
 
@@ -422,7 +422,7 @@ Failed to find fxc.exe
 
 `fxc.exe` is the DirectX shader compiler from the **Windows SDK**. gpui looks for it in
 `GPUI_FXC_PATH`, then on `PATH`, then at one hardcoded SDK version
-(`10.0.26100.0`) — so having a *different* SDK version installed is enough to fail.
+(`10.0.26100.0`) — so having a _different_ SDK version installed is enough to fail.
 
 Point it at yours (PowerShell):
 
@@ -576,7 +576,11 @@ provisioned backend before assuming the running application contains the latest 
 binary, backend installation, and copied overlay are three distinct pieces that can be at different
 revisions.
 
+## Credits
+
+Created by the **Digital & Data** team at the **International Potato Center (CIP)**: Leroy Mwanzia, Henry Juarez, Piero Palacios, Luciano Aguirre, Vilma Hualla & Victor Suarez.
+
 ## Acknowledgements
 
-Mini-Me Desktop is developed for the International Potato Center (CIP). It uses GPUI from Zed and
+Mini-Me uses GPUI from Zed and
 Asta from the Allen Institute for AI. See [`NOTICE`](NOTICE) for third-party attribution.
