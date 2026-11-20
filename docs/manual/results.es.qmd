@@ -87,8 +87,16 @@ relevantes aunque no usen tus palabras exactas.
 ## Hipótesis y descubrimientos
 
 Cuando el **Hypothesis Generator** o **AutoDiscovery** han trabajado en esta conversación, sus
-resultados aparecen en las secciones **Hypotheses** y **Discoveries** del Pinboard. **Discoveries** también muestra una ejecución de AutoDiscovery que
+resultados aparecen en las secciones **Theories** y **Discoveries** del Pinboard. **Discoveries** también muestra una ejecución de AutoDiscovery que
 no se pudo preparar, para que sepas que falló.
+
+Las teorías tardan de 5 a 15 minutos. Mientras tanto, la sección se llama **Hypotheses** y
+muestra solo tu pregunta. Después, cada teoría tiene una tarjeta con su nombre, un resumen
+breve, qué tan nueva es frente al trabajo existente y cuántas leyes y artículos la respaldan.
+Haz clic en una tarjeta para ver sus leyes, las predicciones que nadie ha probado todavía, los
+experimentos que la refutarían y sus primeros artículos de respaldo. Haz clic en un artículo
+para abrirlo. **Open full report** abre en un solo archivo todas las teorías, todos los
+artículos y los vacíos de conocimiento.
 
 ## Informes
 

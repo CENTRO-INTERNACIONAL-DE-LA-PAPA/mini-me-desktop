@@ -777,13 +777,13 @@ async def generate_theories(
 
     Call this once with the research `question`. It submits the run and returns
     immediately with `status: "running"` and a `task_id` — it does NOT block until
-    the theories are ready. The Theories panel then fills in on its own as the run
+    the theories are ready. The Theories section of the Pinboard then fills in on its own as the run
     completes (usually 5–15 minutes); the user does not need to ask.
 
     When you get `status: "running"`, return a HypothesisOutput with
     `status="running"`, that `task_id`, the user's `question`, and empty
     `theories`, and tell the user their theories are being generated and will
-    appear in the Theories panel automatically. Do NOT call this tool again in a
+    appear in the Theories section of the Pinboard automatically. Do NOT call this tool again in a
     loop — the frontend watches the task.
 
     Only pass `resume_task_id` if the user explicitly asks you to check on a

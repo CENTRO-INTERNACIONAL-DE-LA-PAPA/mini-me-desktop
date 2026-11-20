@@ -80,8 +80,15 @@ your exact words.
 ## Hypotheses and discoveries
 
 When the **Hypothesis Generator** or **AutoDiscovery** have worked in this conversation, their
-results are listed in the **Hypotheses** and **Discoveries** sections of the Pinboard. **Discoveries** also lists an AutoDiscovery run that could not be
+results are listed in the **Theories** and **Discoveries** sections of the Pinboard. **Discoveries** also lists an AutoDiscovery run that could not be
 prepared, so you can see that it failed.
+
+Theories take 5–15 minutes. Until they are ready, the section is called **Hypotheses** and
+shows only your question. Each theory then gets a card with its name, a short summary, how
+new it is compared with existing work, and how many laws and papers support it. Click a card
+to see its laws, the predictions nobody has tested yet, the experiments that would disprove
+it and its first supporting papers. Click a paper to open it. **Open full report** opens every
+theory, every paper and the knowledge gaps in one file.
 
 ## Reports
 

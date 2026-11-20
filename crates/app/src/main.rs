@@ -27,6 +27,7 @@ mod settings;
 mod sidecar;
 mod subagent;
 mod theme;
+mod theories;
 mod ui;
 mod update;
 mod workspace;
@@ -2397,6 +2398,11 @@ struct Workbench {
     search_totals: workspace::SearchTotals,
     /// Documents the librarian indexed. See [`protocol::Document`].
     documents: Vec<protocol::Document>,
+    /// Finished Theorizer runs, read from the conversation's `theories/` folder by
+    /// [`Workbench::reload_theories`]. Newest first.
+    theory_runs: Vec<theories::TheoryRun>,
+    /// Theory cards opened to show their laws, predictions and papers, keyed `task_id:index`.
+    expanded_theories: std::collections::HashSet<String>,
     /// What checking each reference against Crossref found, keyed by its citation text.
     ///
     /// **Keyed by the citation, not by position and not by DOI.** Not by position because a turn
@@ -3010,6 +3016,8 @@ impl Workbench {
             dataset_picks: std::collections::HashSet::new(),
             search_totals: workspace::SearchTotals::default(),
             documents: Vec::new(),
+            theory_runs: Vec::new(),
+            expanded_theories: std::collections::HashSet::new(),
             checked: HashMap::new(),
             repaired: HashMap::new(),
             resolving: 0,
@@ -3254,6 +3262,9 @@ impl Workbench {
                         );
                         // The route wrote the outcome into the sandbox as it reported it,
                         // so the spine and outputs have something new to show.
+                        if update.kind == protocol::JobKind::Theorizer {
+                            workbench.reload_theories();
+                        }
                         workbench.refresh_project(cx);
                     }
                     cx.notify();
@@ -5356,6 +5367,8 @@ impl Workbench {
         self.jobs.clear();
         self.plan.clear();
         self.documents.clear();
+        self.theory_runs.clear();
+        self.expanded_theories.clear();
         // Neither had a clearing site at all — only a conditional reassignment in this
         // function's own completion below, `if !snapshot.sources/reports.is_empty()` — so a
         // conversation with fewer or no sources/reports than the one just left kept showing
@@ -5498,6 +5511,7 @@ impl Workbench {
                             workbench.documents = snapshot.documents;
                         }
                         workbench.reload_documents();
+                        workbench.reload_theories();
                         if !snapshot.reports.is_empty() {
                             workbench.reports = snapshot.reports;
                         }
@@ -6148,6 +6162,7 @@ impl Workbench {
         // The librarian may have updated `index.yaml` in its final command after the last values
         // event. One last disk read makes the completed turn and its panel agree immediately.
         self.reload_documents();
+        self.reload_theories();
         self.check_file_claims();
         self.settle_outputs(cx);
         // Written here, and only here, for the same reason the title is: the thread id does not
@@ -6402,6 +6417,8 @@ impl Workbench {
         self.jobs.clear();
         self.plan.clear();
         self.documents.clear();
+        self.theory_runs.clear();
+        self.expanded_theories.clear();
         // Same leak as `open_conversation` had: nothing here ever cleared these, so a brand
         // new thread kept showing whatever sources/reports/dataset picks the previous
         // conversation left behind — this function has no completion callback to clear them
@@ -8560,6 +8577,17 @@ impl Workbench {
     /// The state payload remains useful for richer fields, but it is a slice of one turn and is
     /// not authoritative for membership. A missing or temporarily malformed index preserves that
     /// payload; a valid empty index clears the panel because a removal must be visible too.
+    /// Re-read the finished Theorizer runs saved in this conversation's folder.
+    ///
+    /// Read from disk because the conversation's `hypotheses` artifact never learns a run
+    /// finished; see [`theories`]. Opened cards stay open across a reload.
+    pub(crate) fn reload_theories(&mut self) {
+        self.theory_runs = self
+            .thread_workspace()
+            .map(|dir| theories::load(&dir))
+            .unwrap_or_default();
+    }
+
     pub(crate) fn reload_documents(&mut self) {
         let Some(thread) = self.thread_workspace() else {
             return;

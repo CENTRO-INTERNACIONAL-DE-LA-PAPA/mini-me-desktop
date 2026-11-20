@@ -716,6 +716,158 @@ fn pinboard_section(title: impl IntoElement, content: impl IntoElement) -> Div {
         .child(content)
 }
 
+/// How many papers an opened theory card links to; the rest are in the run's full report.
+const THEORY_PAPERS_IN_CARD: usize = 3;
+
+/// "1 law", "3 laws".
+fn count_label(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// A muted heading over a bulleted list, inside an opened theory card. Nothing for an empty list.
+fn theory_list(heading: &str, items: &[String]) -> Option<Div> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w_full()
+        .min_w_0()
+        .pt_1()
+        .text_xs()
+        .child(
+            div()
+                .text_color(rgb(theme::text_muted()))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(heading.to_string()),
+        );
+    for item in items {
+        list = list.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .text_color(rgb(theme::text()))
+                .child(div().flex_none().child("•"))
+                .child(div().flex_grow().min_w_0().child(item.clone())),
+        );
+    }
+    Some(list)
+}
+
+/// The first papers behind a theory, each opening its link in the browser when it has one.
+fn theory_papers(run_at: usize, at: usize, papers: &[theories::PaperRef]) -> Option<Div> {
+    if papers.is_empty() {
+        return None;
+    }
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w_full()
+        .min_w_0()
+        .pt_1()
+        .text_xs()
+        .child(
+            div()
+                .text_color(rgb(theme::text_muted()))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Supporting papers"),
+        );
+    for (number, paper) in papers.iter().take(THEORY_PAPERS_IN_CARD).enumerate() {
+        let link = paper.url.clone().filter(|url| !url.trim().is_empty());
+        list = list.child(
+            div()
+                .id(SharedString::from(format!("panel-theory-{run_at}-{at}-paper-{number}")))
+                .flex()
+                .flex_row()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .rounded_md()
+                .when_some(link, |row, url| {
+                    row.hover(|style| style.bg(rgb(theme::surface())).cursor_pointer())
+                        .on_click(move |_event, _window, cx| {
+                            // The card underneath toggles on click; a paper press only opens it.
+                            cx.stop_propagation();
+                            if let Err(error) = workspace::browse(&url) {
+                                tracing::warn!(%error, "could not open a theory's paper");
+                            }
+                        })
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(theme::accent()))
+                        .child(format!("[{}]", number + 1)),
+                )
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_w_0()
+                        .text_color(rgb(theme::text()))
+                        .child(paper.citation.clone()),
+                ),
+        );
+    }
+    let hidden = papers.len().saturating_sub(THEORY_PAPERS_IN_CARD);
+    if hidden > 0 {
+        list = list.child(
+            div()
+                .text_color(rgb(theme::text_muted()))
+                .child(format!("+{hidden} more in the full report")),
+        );
+    }
+    Some(list)
+}
+
+/// Under a run's cards: how much was read, what is still open, and the way to the full write-up.
+fn theory_run_footer(run_at: usize, run: &theories::TheoryRun) -> Div {
+    let mut facts = Vec::new();
+    if let Some(papers) = run.papers_reviewed.filter(|&papers| papers > 0) {
+        facts.push(count_label(papers as usize, "paper reviewed", "papers reviewed"));
+    }
+    if !run.knowledge_gaps.is_empty() {
+        facts.push(count_label(
+            run.knowledge_gaps.len(),
+            "knowledge gap",
+            "knowledge gaps",
+        ));
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w_full()
+        .min_w_0()
+        .when(!facts.is_empty(), |footer| {
+            footer.child(
+                div()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child(facts.join(" · ")),
+            )
+        })
+        .when_some(run.report.clone(), |footer, report| {
+            footer.child(
+                ui::Button::new(SharedString::from(format!("open-theory-report-{run_at}")))
+                    .icon(ui::Icon::new("icons/file-text.svg"))
+                    .text("Open full report")
+                    .style(ui::ButtonStyle::Secondary)
+                    .alignment(Alignment::Center)
+                    .on_click(move |_event, _window, _cx| {
+                        if let Err(error) = workspace::open(&report) {
+                            tracing::warn!(%error, "could not open a theorizer report");
+                        }
+                    }),
+            )
+        })
+}
+
 impl Workbench {
     /// The project spine: mission, what's done, what's queued, what's suggested.
     /// The panel's card, with the scrolling contents inside it and a bar beside them.
@@ -1889,6 +2041,159 @@ impl Workbench {
         Some(pinboard_section(format!("{heading} ({})", items.len()), list))
     }
 
+    /// The Theories section of the Pinboard: every finished Theorizer run in this conversation,
+    /// one card per theory. Nothing until a run has finished with at least one theory.
+    ///
+    /// A card shows the theory's name, its plain-language summary, the theorizer's own novelty
+    /// classification and how much stands behind it. Pressing it opens the laws, the untested
+    /// predictions, the experiments that would refute it and its first papers, each paper a link.
+    /// The full write-up, knowledge gaps included, is one press away in the run's `.md` file.
+    pub(crate) fn theories_pinboard_section(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.theory_runs.is_empty() {
+            return None;
+        }
+        let total: usize = self.theory_runs.iter().map(|run| run.theories.len()).sum();
+        let mut list = div().flex().flex_col().gap_2();
+        let several = self.theory_runs.len() > 1;
+        for (run_at, run) in self.theory_runs.iter().enumerate() {
+            // With more than one run, each says which question its theories answer.
+            if several && !run.question.is_empty() {
+                list = list.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_xs()
+                        .child(run.question.clone()),
+                );
+            }
+            for (at, theory) in run.theories.iter().enumerate() {
+                let key = format!("{}:{at}", run.task_id);
+                list = list.child(self.theory_card(run_at, at, &key, theory, cx));
+            }
+            list = list.child(theory_run_footer(run_at, run));
+        }
+        Some(pinboard_section(format!("Theories ({total})"), list))
+    }
+
+    /// One theory as a Pinboard card; see [`Workbench::theories_pinboard_section`].
+    fn theory_card(
+        &self,
+        run_at: usize,
+        at: usize,
+        key: &str,
+        theory: &theories::Theory,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        let open = self.expanded_theories.contains(key);
+        let toggle_key = key.to_string();
+        let mut stats = vec![count_label(theory.laws.len(), "law", "laws")];
+        if !theory.predictions.is_empty() {
+            stats.push(count_label(theory.predictions.len(), "prediction", "predictions"));
+        }
+        stats.push(count_label(theory.supporting_papers.len(), "paper", "papers"));
+        if !theory.conflicting_papers.is_empty() {
+            stats.push(format!("{} conflicting", theory.conflicting_papers.len()));
+        }
+
+        let mut card = div()
+            .id(SharedString::from(format!("panel-theory-{run_at}-{at}")))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .p_2()
+            .rounded_lg()
+            .bg(rgb(theme::surface()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .hover(|style| style.bg(rgb(theme::background())).cursor_pointer())
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                if !workbench.expanded_theories.remove(&toggle_key) {
+                    workbench.expanded_theories.insert(toggle_key.clone());
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        ui::Icon::new("icons/lightbulb.svg")
+                            .size(ui::IconSize::Small)
+                            .colour(theme::accent()),
+                    )
+                    .child(
+                        div()
+                            .flex_grow()
+                            .min_w_0()
+                            .text_color(rgb(theme::text()))
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(theory.title()),
+                    ),
+            );
+        if let Some(summary) = theory.summary.as_deref().filter(|s| !s.trim().is_empty()) {
+            card = card.child(
+                div()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child(summary.to_string()),
+            );
+        }
+        card = card.child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .when_some(theory.novelty(), |row, novelty| {
+                    row.child(
+                        div()
+                            .px_1p5()
+                            .rounded_md()
+                            .bg(rgb(theme::accent_soft()))
+                            .text_color(rgb(theme::accent()))
+                            .child(novelty),
+                    )
+                })
+                .child(
+                    div()
+                        .text_color(rgb(theme::text_muted()))
+                        .child(stats.join(" · ")),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme::accent()))
+                        .child(if open { "Hide details" } else { "Show details" }),
+                ),
+        );
+        if open {
+            card = card
+                .when_some(theory_list("Laws", &theory.laws), |card, list| card.child(list))
+                .when_some(
+                    theory_list("Predictions not yet tested", &theory.predictions),
+                    |card, list| card.child(list),
+                )
+                .when_some(
+                    theory_list("What would refute it", &theory.negative_experiments),
+                    |card, list| card.child(list),
+                )
+                .when_some(
+                    theory_papers(run_at, at, &theory.supporting_papers),
+                    |card, list| card.child(list),
+                );
+        }
+        card
+    }
+
     /// Every result section of the Pinboard below Outputs, in reading order: what was found to
     /// work with (datasets, references, the PDF library), then what the agent concluded.
     pub(crate) fn result_pinboard_sections(&self, cx: &mut Context<Self>) -> Vec<Div> {
@@ -1896,7 +2201,10 @@ impl Workbench {
             self.datasets_pinboard_section(cx),
             self.sources_pinboard_section(cx),
             self.library_pinboard_section(cx),
-            self.bucket_pinboard_section("hypotheses", "Hypotheses"),
+            // A finished run's theories replace the bare question the `hypotheses` bucket holds;
+            // until one finishes, that bucket is all there is to show.
+            self.theories_pinboard_section(cx)
+                .or_else(|| self.bucket_pinboard_section("hypotheses", "Hypotheses")),
             self.bucket_pinboard_section("discoveries", "Discoveries"),
         ]
         .into_iter()

@@ -82,7 +82,7 @@ Available sub-agents:
     relay that failure honestly — never substitute hand-written theories or
     invented papers. If the subagent reports the run is generating (status
     running), tell the user their theories are being generated and will appear in
-    the Theories panel automatically in a few minutes — they do not need to ask
+    the Theories section of the Pinboard automatically in a few minutes — they do not need to ask
     you to check. Do not request the extended novelty evaluation unless the user
     explicitly asks for it and accepts a 30–60 minute wait.
     When a theorizer run completes, its theories are saved to the sandbox at

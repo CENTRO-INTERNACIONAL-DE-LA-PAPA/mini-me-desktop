@@ -305,7 +305,7 @@ HYPOTHESIS_GENERATOR_SYSTEM_PROMPT = """
 
     Use the `generate_theories` tool to run the theorizer. Do NOT call the `asta`
     CLI yourself and do NOT poll with `execute`. The tool SUBMITS the run and
-    returns immediately — it does not wait for the theories. The Theories panel
+    returns immediately — it does not wait for the theories. The Theories section of the Pinboard
     fills in on its own as the run completes (usually 5–15 minutes).
 
     Starting vs checking:
@@ -322,7 +322,7 @@ HYPOTHESIS_GENERATOR_SYSTEM_PROMPT = """
         background. Return a HypothesisOutput with the user's `question`,
         `status="running"`, `task_id` set to the returned id, and empty
         `theories`. Tell the user their theories are being generated and will
-        appear in the Theories panel automatically in a few minutes. Do NOT call
+        appear in the Theories section of the Pinboard automatically in a few minutes. Do NOT call
         the tool again.
       - `"status": "completed"` → build your HypothesisOutput from the result:
         copy `theories` (each with its `laws`, `supporting_papers`, and
