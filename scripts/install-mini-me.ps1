@@ -1,12 +1,15 @@
 # Install (or update by hand) Mini-Me into C:\Program Files\mini-me-desktop.
 #
-# Run from PowerShell opened with "Run as administrator", as the same Windows user who will
-# use the app:
+# This script ships inside the release bundle, at mini-me-desktop\scripts\. Unzip the release,
+# then run it from PowerShell opened with "Run as administrator", as the same Windows user who
+# will use the app:
 #
-#   powershell -ExecutionPolicy Bypass -File .\install-mini-me.ps1
-#   powershell -ExecutionPolicy Bypass -File .\install-mini-me.ps1 -Zip "D:\mini-me-desktop-v0.3.47-windows-x64.zip"
+#   powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\mini-me-desktop\scripts\install-mini-me.ps1"
 #
-# With no -Zip it takes the newest mini-me-desktop-*-windows-x64.zip in your Downloads folder.
+# It installs the mini-me-desktop folder it sits in. -Source points it at another unzipped
+# bundle instead (for example when running the copy in the repository):
+#
+#   powershell -ExecutionPolicy Bypass -File .\install-mini-me.ps1 -Source "D:\mini-me-desktop"
 #
 # Why Program Files: IT whitelists the app by that path. Why Move-Item and not a copy: a moved
 # folder keeps the user's Full control from Downloads, and the self-updater replaces files inside
@@ -18,7 +21,7 @@
 # keeps them.
 
 param(
-    [string]$Zip
+    [string]$Source
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,43 +35,26 @@ if (-not ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Pri
 }
 
 # The person who will use the app. When PowerShell was elevated with a different (admin) account,
-# $env:USERPROFILE points at that account's Downloads, and the permission grant must go to the
-# signed-in user rather than to the admin.
+# the permission grant must go to the signed-in user rather than to the admin.
 $appUser = (Get-CimInstance Win32_ComputerSystem).UserName
 if (-not $appUser) { $appUser = $identity.Name }
-if ($appUser -ne $identity.Name -and -not $Zip) {
-    Write-Host "PowerShell is running as $($identity.Name), but $appUser is signed in." -ForegroundColor Yellow
-    Write-Host 'Pass the zip explicitly with -Zip "<path>" so the right file is used.' -ForegroundColor Yellow
-    exit 1
-}
 
-if (-not $Zip) {
-    $found = Get-ChildItem "$env:USERPROFILE\Downloads\mini-me-desktop-*-windows-x64.zip" -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $found) {
-        Write-Host "No mini-me-desktop-*-windows-x64.zip in $env:USERPROFILE\Downloads." -ForegroundColor Red
-        Write-Host 'Download it there, or pass its location with -Zip "<path>".' -ForegroundColor Red
-        exit 1
-    }
-    $Zip = $found.FullName
-}
-if (-not (Test-Path -LiteralPath $Zip)) {
-    Write-Host "Zip not found: $Zip" -ForegroundColor Red
+# Default: the bundle this script came in (its parent folder, since it lives in scripts\).
+if (-not $Source) { $Source = Split-Path -Parent $PSScriptRoot }
+if (-not (Test-Path -LiteralPath (Join-Path $Source $exeName))) {
+    Write-Host "No $exeName in $Source." -ForegroundColor Red
+    Write-Host 'Run this script from inside the unzipped mini-me-desktop folder, or pass -Source "<folder>".' -ForegroundColor Red
     exit 1
 }
-Write-Host "Installing from $Zip"
+$newBuild = (Resolve-Path -LiteralPath $Source).Path.TrimEnd('\')
+if ($newBuild -ieq $installDir) {
+    Write-Host "This copy is already installed in $installDir. Run the script from a newly unzipped bundle to update." -ForegroundColor Yellow
+    exit 1
+}
+Write-Host "Installing from $newBuild"
 
-# Unpack next to the zip, not into Program Files, so the folder starts out with the user's
-# permissions and then moves.
-$unzipped = Join-Path (Split-Path -Parent $Zip) 'mini-me-desktop-install'
-if (Test-Path -LiteralPath $unzipped) { Remove-Item -LiteralPath $unzipped -Recurse -Force }
-Expand-Archive -LiteralPath $Zip -DestinationPath $unzipped
-$newBuild = Join-Path $unzipped 'mini-me-desktop'
-if (-not (Test-Path -LiteralPath (Join-Path $newBuild $exeName))) {
-    Remove-Item -LiteralPath $unzipped -Recurse -Force
-    Write-Host "The zip does not contain mini-me-desktop\$exeName. Is it a Mini-Me release?" -ForegroundColor Red
-    exit 1
-}
+# Step out of the bundle so this session doesn't hold the folder that is about to move.
+Set-Location -LiteralPath $env:SystemRoot
 
 $running = Get-Process -Name 'mini-me-desktop-app' -ErrorAction SilentlyContinue
 if ($running) {
@@ -82,7 +68,6 @@ if (Test-Path -LiteralPath $installDir) {
     Remove-Item -LiteralPath $installDir -Recurse -Force
 }
 Move-Item -LiteralPath $newBuild -Destination $installDir
-Remove-Item -LiteralPath $unzipped -Recurse -Force
 
 # (OI)(CI)M = Modify on the folder and everything in it, inherited by files the updater creates.
 & icacls.exe $installDir /grant "${appUser}:(OI)(CI)M" /T /C /Q | Out-Null
@@ -91,5 +76,5 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ''
-Write-Host "Mini-Me installed from $(Split-Path -Leaf $Zip)" -ForegroundColor Green
+Write-Host "Mini-Me installed from $newBuild" -ForegroundColor Green
 Write-Host "Open it from $installDir\$exeName"
